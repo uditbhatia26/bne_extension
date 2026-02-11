@@ -1,0 +1,48 @@
+/* Tooltip styling */
+#click-detector-tooltip {
+    position: fixed;
+    z-index: 2147483647;
+    background: rgba(30, 30, 30, 0.92);
+    color: #f0f0f0;
+    padding: 10px 14px;
+    border-radius: 8px;
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+    font-size: 13px;
+    line-height: 1.5;
+    pointer-events: none;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    backdrop-filter: blur(8px);
+    transition: opacity 0.2s ease;
+    max-width: 240px;
+}
+
+#click-detector-tooltip .cd-label {
+    color: #7cacf8;
+    font-weight: 600;
+}
+
+/* Ripple animation on click */
+.click-detector-ripple {
+    position: fixed;
+    z-index: 2147483646;
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
+    background: rgba(66, 133, 244, 0.4);
+    pointer-events: none;
+    transform: translate(-50%, -50%) scale(0);
+    animation: click-detector-ripple-anim 0.6s ease-out forwards;
+}
+
+@keyframes click-detector-ripple-anim {
+    0% {
+        transform: translate(-50%, -50%) scale(0);
+        opacity: 1;
+    }
+
+    100% {
+        transform: translate(-50%, -50%) scale(4);
+        opacity: 0;
+    }
+}

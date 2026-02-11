@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="popup.css" />
+</head>
+
+<body>
+    <div class="header">
+        <h1>Kit Creator</h1>
+        <button class="theme-toggle" id="themeToggle" title="Toggle theme">🌙</button>
+    </div>
+
+    <div class="recording-section">
+        <div class="record-buttons">
+            <button id="startRecordBtn">Start</button>
+            <button id="stopRecordBtn" disabled>Stop</button>
+        </div>
+        <div class="status" id="recordingStatus">
+            <span class="dot"></span>
+            <span id="statusText">Ready to record</span>
+        </div>
+    </div>
+
+    <div class="recordings-section">
+        <div class="section-header">
+            <span class="section-title">Analyzed Videos</span>
+        </div>
+        <div class="recordings-list" id="analyzedList">
+            <div class="empty-state">
+                <p>No analyzed videos yet</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="recordings-section">
+        <div class="section-header">
+            <span class="section-title">Recordings</span>
+            <button class="clear-btn" id="clearRecordingsBtn">Clear All</button>
+        </div>
+        <div class="recordings-list" id="recordingsList">
+            <div class="empty-state">
+                <p>No recordings yet</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Video Player Modal -->
+    <div class="video-modal" id="videoModal">
+        <div class="modal-header">
+            <button class="close-btn" id="closeVideoBtn">Close</button>
+        </div>
+        <video id="videoPlayer" controls></video>
+    </div>
+
+    <!-- Mode Selection Modal -->
+    <div class="mode-modal" id="modeModal">
+        <h2>Select Recording Mode</h2>
+        <div class="mode-options">
+            <div class="mode-option" id="modeTab">
+                <div class="mode-title">Current Tab</div>
+                <div class="mode-desc">Record only this browser tab</div>
+            </div>
+            <div class="mode-option" id="modeScreen">
+                <div class="mode-title">Entire Screen</div>
+                <div class="mode-desc">Record your full screen or window</div>
+            </div>
+        </div>
+        <button class="cancel-btn" id="modeCancelBtn">Cancel</button>
+    </div>
+
+    <!-- Name Input Modal -->
+    <div class="name-modal" id="nameModal">
+        <h2>Name Your Recording</h2>
+        <input type="text" id="recordingNameInput" placeholder="Enter recording name..." autofocus />
+        <button class="save-btn" id="saveNameBtn">Save Recording</button>
+    </div>
+
+    <!-- Confirm Modal -->
+    <div class="confirm-modal" id="confirmModal">
+        <h2 id="confirmTitle">Delete Recording?</h2>
+        <p id="confirmMessage">This action cannot be undone.</p>
+        <div class="confirm-buttons">
+            <button class="confirm-btn confirm-cancel" id="confirmCancelBtn">Cancel</button>
+            <button class="confirm-btn confirm-delete" id="confirmDeleteBtn">Delete</button>
+        </div>
+    </div>
+
+    <!-- AI Analysis Modal -->
+    <div class="ai-modal" id="aiModal">
+        <div class="ai-modal-scroll">
+            <h2>AI Tutorial Generator</h2>
+            <p class="ai-modal-subtitle">Configure how your tutorial video will be generated</p>
+
+            <div class="ai-field">
+                <label class="ai-label">Voice Model</label>
+                <div class="ai-options voice-options" id="voiceOptions">
+                    <div class="ai-option selected" data-value="Sarah">
+                        <div class="ai-option-header">
+                            <span class="ai-option-name">Sarah</span>
+                            <span class="ai-option-badge">Popular</span>
+                        </div>
+                        <span class="ai-option-desc">Friendly and conversational female voice, approachable tone</span>
+                    </div>
+                    <div class="ai-option" data-value="Enniah">
+                        <div class="ai-option-header">
+                            <span class="ai-option-name">Enniah</span>
+                        </div>
+                        <span class="ai-option-desc">Warm and expressive female voice, great for tutorials</span>
+                    </div>
+                    <div class="ai-option" data-value="Patrick">
+                        <div class="ai-option-header">
+                            <span class="ai-option-name">Patrick</span>
+                        </div>
+                        <span class="ai-option-desc">Clear and authoritative male voice, ideal for professional
+                            guides</span>
+                    </div>
+                    <div class="ai-option" data-value="Allison">
+                        <div class="ai-option-header">
+                            <span class="ai-option-name">Allison</span>
+                        </div>
+                        <span class="ai-option-desc">Calm and natural female voice, easy to follow along</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="ai-field">
+                <label class="ai-label">Narration Style</label>
+                <div class="ai-options style-options" id="styleOptions">
+                    <div class="ai-option selected" data-value="professional">
+                        <div class="ai-option-header">
+                            <span class="ai-option-name">Professional</span>
+                        </div>
+                        <span class="ai-option-desc">Formal and structured step-by-step instructions</span>
+                    </div>
+                    <div class="ai-option" data-value="casual">
+                        <div class="ai-option-header">
+                            <span class="ai-option-name">Casual</span>
+                        </div>
+                        <span class="ai-option-desc">Friendly and relaxed, like a colleague showing you how</span>
+                    </div>
+                    <div class="ai-option" data-value="concise">
+                        <div class="ai-option-header">
+                            <span class="ai-option-name">Concise</span>
+                        </div>
+                        <span class="ai-option-desc">Short and direct, just the essential actions</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="ai-field">
+                <label class="ai-label">Language</label>
+                <div class="ai-select-wrapper">
+                    <select class="ai-select" id="aiLanguage">
+                        <option value="en">English</option>
+                        <option value="es">Spanish</option>
+                        <option value="fr">French</option>
+                        <option value="de">German</option>
+                        <option value="pt">Portuguese</option>
+                        <option value="it">Italian</option>
+                        <option value="ja">Japanese</option>
+                        <option value="ko">Korean</option>
+                        <option value="zh">Chinese (Mandarin)</option>
+                        <option value="hi">Hindi</option>
+                        <option value="ar">Arabic</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="ai-progress" id="aiProgress" style="display: none;">
+                <div class="ai-progress-bar">
+                    <div class="ai-progress-fill" id="aiProgressFill"></div>
+                </div>
+                <div class="ai-progress-text" id="aiProgressText">Initializing...</div>
+            </div>
+
+            <div class="ai-actions">
+                <button class="ai-cancel-btn" id="aiCancelBtn">Cancel</button>
+                <button class="ai-generate-btn" id="aiGenerateBtn">
+                    <svg viewBox="0 0 256 256" width="14" height="14" fill="currentColor">
+                        <path
+                            d="M208,144a15.78,15.78,0,0,1-10.42,14.94L168,168l-9.06,29.58a16,16,0,0,1-29.88,0L120,168l-29.58-9.06a16,16,0,0,1,0-29.88L120,120l9.06-29.58a16,16,0,0,1,29.88,0L168,120l29.58,9.06A15.78,15.78,0,0,1,208,144Z" />
+                    </svg>
+                    Generate Tutorial
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Render Mode Selection Modal -->
+    <div class="render-modal" id="renderModal">
+        <h2>Choose Render Mode</h2>
+        <p class="render-modal-subtitle">Analysis complete! Now select how you want your tutorial video rendered.</p>
+
+        <div class="render-options">
+            <div class="render-option" id="renderVoiceOnly">
+                <div class="render-icon">🎙️</div>
+                <div class="render-content">
+                    <div class="render-title">Voice Narrations Only</div>
+                    <div class="render-desc">Add voice narrations at each click point while keeping the original video
+                        flowing continuously</div>
+                </div>
+            </div>
+
+            <div class="render-option" id="renderFull">
+                <div class="render-icon">✨</div>
+                <div class="render-content">
+                    <div class="render-title">Full Annotations</div>
+                    <div class="render-desc">Freeze frames at each click, add visual annotations, and include voice
+                        narrations for a complete tutorial experience</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="render-progress" id="renderProgress" style="display: none;">
+            <div class="render-progress-bar">
+                <div class="render-progress-fill" id="renderProgressFill"></div>
+            </div>
+            <div class="render-progress-text" id="renderProgressText">Rendering video...</div>
+        </div>
+
+        <div class="render-actions">
+            <button class="render-cancel-btn" id="renderCancelBtn">Back</button>
+        </div>
+    </div>
+
+    <script src="db.js"></script>
+    <script src="popup.js"></script>
+</body>
+
+</html>

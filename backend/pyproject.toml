@@ -1,0 +1,23 @@
+[project]
+name = "Extension"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "av>=16.1.0",
+    "elevenlabs>=1.50.0",
+    "fastapi>=0.128.2",
+    "ipykernel>=7.2.0",
+    "langchain>=1.2.8",
+    "langchain-core>=1.2.9",
+    "langchain-google-genai>=4.2.0",
+    "moviepy>=1.0.3",
+    "mutagen>=1.47.0",
+    "opencv-python>=4.13.0.92",
+    "pillow>=12.1.0",
+    "pydantic>=2.12.5",
+    "python-dotenv>=1.2.1",
+    "python-multipart>=0.0.22",
+    "uvicorn>=0.40.0",
+]

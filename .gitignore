@@ -1,0 +1,8 @@
+.env
+.venv
+sessions
+uv.lock
+Flow.md
+__pycache__/
+*.pyc
+*.ipynb
