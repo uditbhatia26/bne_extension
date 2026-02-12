@@ -65,7 +65,21 @@ eleven_client = ElevenLabs(api_key=ELEVENLABS_API_KEY) if ELEVENLABS_API_KEY els
 # --- Helper: TTS ---
 
 def generate_tts_audio(text: str, voice_name: str, output_path: str) -> float:
-    """Generate TTS audio via ElevenLabs. Returns duration in seconds."""
+    """
+    Generate TTS audio via ElevenLabs API.
+
+    Args:
+        text: The narration text to convert to speech.
+        voice_name: Voice identifier (e.g., "Sarah", "Enniah", "Patrick", "Allison").
+                    Falls back to "Sarah" if not found in VOICE_MAP.
+        output_path: Absolute path where the MP3 file will be saved.
+
+    Returns:
+        Duration of the generated audio in seconds.
+
+    Raises:
+        RuntimeError: If ELEVENLABS_API_KEY is not configured.
+    """
     from mutagen.mp3 import MP3
 
     if not eleven_client:
@@ -90,9 +104,16 @@ def generate_tts_audio(text: str, voice_name: str, output_path: str) -> float:
 
 def render_voice_only(session_dir: Path, video_filename: str, video_name: str, narrations: list) -> str:
     """
-    Renders voice-only mode: video freezes at each click point while narration plays.
-    Uses moviepy to segment video and insert frozen frames with narrations.
-    Returns the output filename.
+    Render a 'voice-only' video where the video freezes at each click point while narration plays.
+
+    Args:
+        session_dir: Path to the session directory containing video and audio files.
+        video_filename: Name of the input video file.
+        video_name: Base name for output and narration files.
+        narrations: List of dicts with keys 'click_time', 'audio_duration', etc.
+
+    Returns:
+        The output filename of the rendered video (str).
     """
     import subprocess
     
@@ -231,6 +252,12 @@ def render_voice_only(session_dir: Path, video_filename: str, video_name: str, n
 
 @app.get('/')
 async def home():
+    """
+    Home endpoint for server health check.
+
+    Returns:
+        JSON with status and title.
+    """
     return {
         'status': 'OK',
         'title': 'Testing Server'
@@ -249,7 +276,23 @@ async def process_analysis_job(
     language: str,
     video_content_type: str
 ):
-    """Background task that processes the video analysis."""
+    """
+    Background task that processes the video analysis.
+
+    Args:
+        job_id: Unique job identifier.
+        session_id: Unique session identifier.
+        video_bytes: Raw bytes of the uploaded video.
+        video_filename: Name of the uploaded video file.
+        click_data: List of click event dicts.
+        voice: Voice name for TTS.
+        style: Narration style.
+        language: Narration language.
+        video_content_type: MIME type of the video.
+
+    Returns:
+        None. Updates the jobs dict with progress and results.
+    """
     session_dir = SESSIONS_DIR / session_id
     
     try:
@@ -429,8 +472,18 @@ async def analyze(
     language: str = Form("English"),
 ):
     """
-    Step 1: Start video analysis job and return job_id immediately.
-    Use /status/{job_id} to check progress.
+    Start video analysis job and return job_id immediately.
+
+    Args:
+        background_tasks: FastAPI background task manager.
+        video: Uploaded video file (form-data).
+        clicks: JSON string of click data (form-data).
+        voice: Voice name for TTS (form-data).
+        style: Narration style (form-data).
+        language: Narration language (form-data).
+
+    Returns:
+        JSON with job_id, session_id, and status message.
     """
     
     # Generate IDs
@@ -486,7 +539,12 @@ async def analyze(
 async def get_job_status(job_id: str):
     """
     Check the status of an analysis job.
-    Returns: {status, progress, message, result (if complete), error (if failed)}
+
+    Args:
+        job_id: The job identifier to check.
+
+    Returns:
+        JSON with status, progress, message, result (if complete), error (if failed).
     """
     if job_id not in jobs:
         return {"status": "not_found", "message": "Job ID not found"}
@@ -501,10 +559,15 @@ async def render(
     background_tasks: BackgroundTasks = None
 ):
     """
-    Step 2: Start video rendering job and return job_id immediately.
-    Use /status/{job_id} to check progress.
-    mode = "voice-only"  → video freezes at each click point while narration plays
-    mode = "full"        → (not yet implemented) frozen frames + visual annotations (boxes/markers) + narration audio
+    Start video rendering job and return job_id immediately.
+
+    Args:
+        session_id: The session identifier to render.
+        mode: Render mode ('voice-only' or 'full').
+        background_tasks: FastAPI background task manager.
+
+    Returns:
+        JSON with job_id, session_id, mode, and status message.
     """
     session_dir = SESSIONS_DIR / session_id
     if not session_dir.exists():
@@ -561,7 +624,19 @@ async def process_render_job(
     meta: dict,
     mode: str
 ):
-    """Background task for rendering video"""
+    """
+    Background task for rendering video.
+
+    Args:
+        job_id: Unique job identifier.
+        session_id: Unique session identifier.
+        session_dir: Path to the session directory.
+        meta: Metadata dict for the session.
+        mode: Render mode ('voice-only' or 'full').
+
+    Returns:
+        None. Updates the jobs dict with progress and results.
+    """
     try:
         jobs[job_id].update({"status": "rendering", "progress": 10, "message": f"Starting {mode} render..."})
         
@@ -616,7 +691,16 @@ async def process_render_job(
 
 @app.get('/download/{session_id}/{filename}')
 async def download_video(session_id: str, filename: str):
-    """Download rendered video file."""
+    """
+    Download rendered video file.
+
+    Args:
+        session_id: The session identifier.
+        filename: The video filename to download.
+
+    Returns:
+        FileResponse for the requested video file, or error JSON if not found.
+    """
     session_dir = SESSIONS_DIR / session_id
     file_path = session_dir / filename
     
@@ -632,7 +716,15 @@ async def download_video(session_id: str, filename: str):
 
 @app.delete('/session/{session_id}')
 async def cleanup_session(session_id: str):
-    """Clean up session files after the user has downloaded the video."""
+    """
+    Clean up session files after the user has downloaded the video.
+
+    Args:
+        session_id: The session identifier to clean up.
+
+    Returns:
+        JSON with status and message.
+    """
     session_dir = SESSIONS_DIR / session_id
     if session_dir.exists():
         shutil.rmtree(session_dir, ignore_errors=True)
