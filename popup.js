@@ -1,6 +1,87 @@
-// Popup script: Screen Recorder UI
+/**
+ * POPUP.JS - Screen Recorder UI Controller
+ * 
+ * This script manages the popup interface for the screen recording extension.
+ * It handles:
+ * - Recording controls (start/stop)
+ * - UI interactions and modals
+ * - Integration with backend API for video analysis
+ * - Video playback and management
+ * - Job polling for long-running tasks
+ * 
+ * Key workflows:
+ * 1. User records screen/tab → saves to IndexedDB
+ * 2. User submits for AI analysis → backend analyzes and generates narrations
+ * 3. User renders video → backend creates final video with audio
+ * 4. User downloads result → saved video is retrieved from backend
+ * 
+ * ============================================
+ * DATA FLOW OVERVIEW
+ * ============================================
+ * 
+ * Recording Flow:
+ * START_RECORDING → background.js captures frames/audio
+ *                → popup.js saves blob to IndexedDB
+ *                → recording appears in "Not Analyzed" section
+ * 
+ * Analysis Flow:
+ * analyzeRecording() → POST /analyze → backend processes video
+ *                   → pollJobStatus() checks progress every 2 seconds
+ *                   → on complete: recording moves to "Analyzed" section
+ *                   → session_id, narrations, summary stored
+ * 
+ * Render Flow:
+ * startRender() → POST /render/{session_id} → backend generates final video
+ *              → pollRenderJobStatus() checks progress every 2 seconds
+ *              → on complete: output_file stored in recording
+ *              → next preview load will fetch from backend
+ * 
+ * Display Flow:
+ * loadPreviews() → checks if output_file exists
+ *               → if yes: loads from /download/{session}/{output_file}
+ *               → if no: loads from local IndexedDB blob
+ * 
+ * ============================================
+ * MODAL MANAGEMENT
+ * ============================================
+ * 
+ * modeModal        - User selects recording mode (tab/screen)
+ * nameModal        - User enters recording name
+ * aiModal          - User selects voice, style, language for analysis
+ * renderModal      - User selects render mode (voice-only/full)
+ * videoModal       - Video player for playback
+ * confirmModal     - Delete confirmation dialog
+ * 
+ * ============================================
+ * PERSISTENT STATE (chrome.storage.local)
+ * ============================================
+ * 
+ * pendingJob       - Active analysis job info (for resume on popup reopen)
+ * pendingSession   - Completed analysis awaiting render
+ * pendingRenderJob - Active render job info (for resume on popup reopen)
+ * 
+ * ============================================
+ * BACKEND ENDPOINTS
+ * ============================================
+ * 
+ * POST /analyze                        - Submit video + clicks for analysis
+ *      Returns: {job_id, session_id}
+ * 
+ * GET /status/{job_id}                 - Check analysis/render job progress
+ *     Returns: {status, progress, message, result}
+ * 
+ * POST /render/{session_id}            - Request rendering with mode
+ *      Returns: {job_id, session_id, mode}
+ * 
+ * GET /download/{session}/{filename}   - Download rendered video
+ *     Returns: FileResponse with video/mp4
+ * 
+ * DELETE /session/{session_id}         - Clean up session files
+ */
 
-const startRecordBtn = document.getElementById("startRecordBtn");
+// ============================================
+// DOM ELEMENT REFERENCES
+// ============================================
 const stopRecordBtn = document.getElementById("stopRecordBtn");
 const recordingStatus = document.getElementById("recordingStatus");
 const statusText = document.getElementById("statusText");
@@ -74,7 +155,16 @@ themeToggle.addEventListener("click", () => {
     localStorage.setItem("theme", isLight ? "light" : "dark");
 });
 
-// Custom confirm dialog
+// ============================================
+// UTILITY FUNCTIONS
+// ============================================
+
+/**
+ * Shows a custom confirm dialog modal
+ * @param {string} title - Title text for the dialog
+ * @param {string} message - Message body of the dialog
+ * @returns {Promise<boolean>} - True if confirmed, false if cancelled
+ */
 function showConfirm(title, message) {
     return new Promise((resolve) => {
         confirmTitle.textContent = title;
@@ -106,8 +196,14 @@ function showConfirm(title, message) {
 // Temporary storage for pending recording data
 let pendingRecordingData = null;
 
-// --- Recording Controls ---
+// ============================================
+// RECORDING CONTROLS
+// ============================================
 
+/**
+ * Updates the UI to reflect recording state
+ * @param {boolean} isRecording - Whether recording is currently active
+ */
 function updateRecordingUI(isRecording) {
     startRecordBtn.disabled = isRecording;
     stopRecordBtn.disabled = !isRecording;
@@ -141,6 +237,11 @@ modeCancelBtn.addEventListener("click", () => {
 
 // Start recording with selected mode
 async function startRecordingWithMode(mode) {
+    /**
+     * Initiates recording in the specified mode (tab or screen)
+     * Clears previous click data and communicates with background service worker
+     * @param {string} mode - "tab" for current tab only, "screen" for full screen
+     */
     modeModal.classList.remove("active");
     statusText.textContent = "Starting...";
 
@@ -222,6 +323,10 @@ recordingNameInput.addEventListener("keypress", (e) => {
 });
 
 async function saveRecordingWithName() {
+    /**
+     * Saves the pending recording to IndexedDB with user-provided name
+     * Clears pending data after successful save and reloads recording list
+     */
     if (!pendingRecordingData) return;
 
     const name = recordingNameInput.value.trim() || `Recording ${Date.now()}`;
@@ -248,11 +353,20 @@ async function saveRecordingWithName() {
 // --- Recordings Management ---
 
 function formatDate(isoString) {
+    /**
+     * Formats ISO date string to readable format (e.g., "Jan 15, 2:30 PM")
+     * @param {string} isoString - ISO format date string
+     * @returns {string} - Formatted date/time string
+     */
     const d = new Date(isoString);
     return d.toLocaleDateString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
 async function loadRecordings() {
+    /**
+     * Fetches all recordings from IndexedDB and renders them
+     * Splits recordings into analyzed (with session_id) and non-analyzed categories
+     */
     try {
         const recordings = await window.RecordingsDB.getRecordings();
         renderRecordings(recordings);
@@ -264,7 +378,12 @@ async function loadRecordings() {
 }
 
 function renderRecordings(recordings) {
-    // Split recordings into analyzed and non-analyzed
+    /**
+     * Renders the recordings list UI
+     * Splits into analyzed and non-analyzed sections
+     * Sets up event listeners for all action buttons
+     * @param {Array} recordings - Array of recording objects from IndexedDB
+     */
     const analyzed = recordings ? recordings.filter(r => r.session_id) : [];
     const notAnalyzed = recordings ? recordings.filter(r => !r.session_id) : [];
 
@@ -302,7 +421,7 @@ function renderRecordings(recordings) {
                         <div class="rec-actions">
                             <button class="play-btn" data-id="${rec.id}" title="Play">${playIcon}</button>
                             <button class="render-btn" data-id="${rec.id}" data-session="${rec.session_id}" title="Render Video">${renderIcon}</button>
-                            <button class="download-btn" data-id="${rec.id}" title="Download Original">${downloadIcon}</button>
+                            <button class="download-btn" data-id="${rec.id}" title="Download Analyzed">${downloadIcon}</button>
                             <button class="delete-btn" data-id="${rec.id}" title="Delete">${deleteIcon}</button>
                         </div>
                     </div>
@@ -402,10 +521,16 @@ function renderRecordings(recordings) {
 }
 
 async function loadPreviews(recordings) {
+    /**
+     * Loads video previews for all recordings
+     * For rendered videos, fetches from backend; for others, uses local blobs
+     * Seeks to 0.5s to show a representative frame
+     * @param {Array} recordings - Array of recording objects
+     */
     for (const rec of recordings) {
         try {
             const recording = await window.RecordingsDB.getRecording(rec.id);
-            if (!recording || !recording.blob) continue;
+            if (!recording) continue;
 
             // Check both lists for the preview element
             let previewEl = recordingsList.querySelector(`.rec-preview[data-id="${rec.id}"] video`);
@@ -414,8 +539,16 @@ async function loadPreviews(recordings) {
             }
             if (!previewEl) continue;
 
-            const url = URL.createObjectURL(recording.blob);
-            previewEl.src = url;
+            // For analyzed videos with rendered output, load from backend
+            if (recording.output_file && recording.session_id) {
+                const url = `http://localhost:8000/download/${recording.session_id}/${recording.output_file}`;
+                previewEl.src = url;
+                console.log(`Loading rendered video from backend: ${url}`);
+            } else {
+                // For non-analyzed or non-rendered videos, load from local blob
+                const url = URL.createObjectURL(recording.blob);
+                previewEl.src = url;
+            }
 
             // Seek to 0.5 second to get a representative frame
             previewEl.onloadedmetadata = () => {
@@ -428,12 +561,26 @@ async function loadPreviews(recordings) {
 }
 
 async function playRecording(id) {
+    /**
+     * Opens video player modal and plays the specified recording
+     * Loads from backend if rendered, from local blob otherwise
+     * @param {number} id - Recording ID from IndexedDB
+     */
     try {
         const recording = await window.RecordingsDB.getRecording(id);
         if (!recording) return;
 
-        const url = URL.createObjectURL(recording.blob);
-        videoPlayer.src = url;
+        // For analyzed videos with rendered output, play from backend
+        if (recording.output_file && recording.session_id) {
+            const url = `http://localhost:8000/download/${recording.session_id}/${recording.output_file}`;
+            videoPlayer.src = url;
+            console.log(`Playing rendered video from backend: ${url}`);
+        } else {
+            // For non-analyzed or non-rendered videos, play from local blob
+            const url = URL.createObjectURL(recording.blob);
+            videoPlayer.src = url;
+        }
+
         videoPlayer.onloadedmetadata = () => videoPlayer.play();
         videoModal.classList.add("active");
     } catch (err) {
@@ -442,23 +589,47 @@ async function playRecording(id) {
 }
 
 async function downloadRecording(id) {
+    /**
+     * Downloads the recording or analyzed video
+     * For analyzed videos with output_file, downloads the rendered video from backend
+     * Otherwise downloads the original WebM blob
+     * @param {number} id - Recording ID from IndexedDB
+     */
     try {
         const recording = await window.RecordingsDB.getRecording(id);
         if (!recording) return;
 
         const safeName = (recording.name || `recording-${id}`).replace(/[^a-zA-Z0-9-_]/g, "_");
-        const url = URL.createObjectURL(recording.blob);
         const a = document.createElement("a");
-        a.href = url;
-        a.download = `${safeName}.webm`;
+
+        // For analyzed videos with rendered output, download from backend
+        if (recording.output_file && recording.session_id) {
+            const backendUrl = `http://localhost:8000/download/${recording.session_id}/${recording.output_file}`;
+            a.href = backendUrl;
+            a.download = recording.output_file;
+            console.log(`Downloading analyzed video from backend: ${backendUrl}`);
+        } else {
+            // For non-analyzed or non-rendered videos, download from local blob
+            const url = URL.createObjectURL(recording.blob);
+            a.href = url;
+            a.download = `${safeName}.webm`;
+        }
+
         a.click();
-        URL.revokeObjectURL(url);
+        if (!recording.output_file || !recording.session_id) {
+            URL.revokeObjectURL(a.href);
+        }
     } catch (err) {
         console.error("Failed to download recording:", err);
     }
 }
 
 async function downloadFrames(id) {
+    /**
+     * Downloads all captured frames as PNG images + JSON metadata file
+     * Frames are snapshots at each click moment during recording
+     * @param {number} id - Recording ID from IndexedDB
+     */
     try {
         const recording = await window.RecordingsDB.getRecording(id);
         if (!recording || !recording.frames || recording.frames.length === 0) {
@@ -506,6 +677,10 @@ async function downloadFrames(id) {
 }
 
 async function deleteRecording(id) {
+    /**
+     * Deletes a recording from IndexedDB after user confirmation
+     * @param {number} id - Recording ID to delete
+     */
     const confirmed = await showConfirm("Delete Recording?", "This action cannot be undone.");
     if (!confirmed) {
         return;
@@ -519,7 +694,16 @@ async function deleteRecording(id) {
 }
 
 async function analyzeRecording(id) {
+    /**
+     * Opens AI analysis modal for the specified recording
+     * User can select voice, narration style, and language before submitting
+     * @param {number} id - Recording ID to analyze
+     */
     currentAiRecordingId = id;
+    aiGenerateBtn.disabled = false;
+    aiProgress.style.display = "none";
+    aiProgressFill.style.width = "0%";
+    aiProgressText.textContent = "Configure your tutorial settings...";
     aiModal.classList.add("active");
 }
 
@@ -632,7 +816,11 @@ aiGenerateBtn.addEventListener("click", async () => {
 
 // Poll job status every 2 seconds
 function startJobPolling(jobId) {
-    console.log(`Starting polling for job ${jobId}`);
+    /**
+     * Initiates polling for AI analysis job status
+     * Polls backend every 2 seconds until job completes or errors
+     * @param {string} jobId - Backend job ID returned from /analyze endpoint
+     */
 
     // Clear any existing polling
     if (pollingInterval) {
@@ -649,6 +837,12 @@ function startJobPolling(jobId) {
 }
 
 async function pollJobStatus(jobId) {
+    /**
+     * Polls the backend for current AI analysis job status
+     * Updates UI progress bar and handles job completion/error states
+     * When job completes, saves session data and opens render mode selection
+     * @param {string} jobId - Backend job ID to check
+     */
     try {
         const response = await fetch(`http://localhost:8000/status/${jobId}`);
         const status = await response.json();
@@ -738,6 +932,10 @@ async function pollJobStatus(jobId) {
 
 // Voice-only mode
 renderVoiceOnlyBtn.addEventListener("click", async () => {
+    /**
+     * Initiates "voice-only" render mode
+     * Video freezes at each click point while narration plays
+     */
     if (!currentSessionData) return;
     await startRender("voice-only");
 });
@@ -759,6 +957,11 @@ renderCancelBtn.addEventListener("click", async () => {
 
 // Start rendering with selected mode
 async function startRender(mode) {
+    /**
+     * Submits a render job to the backend
+     * Shows progress UI and starts polling for job status
+     * @param {string} mode - "voice-only" or "full" (full not yet implemented)
+     */
     try {
         // Show progress
         renderProgress.style.display = "block";
@@ -821,7 +1024,12 @@ async function startRender(mode) {
 
 // Poll render job status every 2 seconds
 function startRenderJobPolling(jobId, mode) {
-    console.log(`Starting polling for render job ${jobId}`);
+    /**
+     * Initiates polling for video render job status
+     * Polls backend every 2 seconds until render completes or errors
+     * @param {string} jobId - Backend render job ID
+     * @param {string} mode - Render mode for display purposes
+     */
 
     // Clear any existing polling
     if (renderPollingInterval) {
@@ -838,6 +1046,13 @@ function startRenderJobPolling(jobId, mode) {
 }
 
 async function pollRenderJobStatus(jobId, mode) {
+    /**
+     * Polls the backend for current video render job status
+     * Updates progress bar and handles job completion
+     * When render completes, updates recording with output_file for future playback
+     * @param {string} jobId - Backend render job ID
+     * @param {string} mode - Render mode ("voice-only" or "full")
+     */
     try {
         const response = await fetch(`http://localhost:8000/status/${jobId}`);
         const status = await response.json();
@@ -854,6 +1069,22 @@ async function pollRenderJobStatus(jobId, mode) {
             renderPollingInterval = null;
 
             console.log("Render complete:", status.result);
+
+            // Update the recording with the rendered output file
+            if (currentAiRecordingId && status.result && status.result.output_file) {
+                try {
+                    await window.RecordingsDB.updateRecording(currentAiRecordingId, {
+                        output_file: status.result.output_file,
+                        rendered_mode: mode,
+                        rendered_at: new Date().toISOString()
+                    });
+                    console.log("Recording updated with rendered output_file:", status.result.output_file);
+                    // Refresh the recordings list to update the preview
+                    loadRecordings();
+                } catch (err) {
+                    console.error("Failed to update recording with output_file:", err);
+                }
+            }
 
             // Clear pending render job
             await chrome.storage.local.remove("pendingRenderJob");
@@ -936,6 +1167,14 @@ clearRecordingsBtn.addEventListener("click", async () => {
 
 // Check for pending session or job on popup open
 async function restorePendingSession() {
+    /**
+     * Restores incomplete jobs/sessions when popup is reopened
+     * Checks for 3 types of pending tasks:
+     * 1. Ongoing render job - resumes polling
+     * 2. Completed analysis awaiting render - shows render modal
+     * 3. Ongoing analysis job - resumes polling
+     * Allows users to continue where they left off if popup was closed
+     */
     try {
         const storage = await chrome.storage.local.get(["pendingSession", "pendingJob", "pendingRenderJob"]);
 
@@ -969,6 +1208,7 @@ async function restorePendingSession() {
         // Check for ongoing analysis job that needs to resume polling
         if (storage.pendingJob) {
             console.log("Restoring pending job:", storage.pendingJob);
+            currentAiRecordingId = storage.pendingJob.recording_id;
 
             // Show AI modal with progress
             aiModal.classList.add("active");
