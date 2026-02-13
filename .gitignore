@@ -6,3 +6,6 @@ Flow.md
 __pycache__/
 *.pyc
 *.ipynb
+*.mp4
+
+zoom_testing.py
