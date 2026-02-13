@@ -254,6 +254,112 @@ def render_voice_only(session_dir: Path, video_filename: str, video_name: str, n
     return output_filename
 
 
+
+
+def render_voice_with_annotations(session_dir: Path, video_filename: str, video_name: str, narrations: list, click_locations: list) -> str:
+    
+    video_path = session_dir / video_filename
+    output_filename = f"{video_name}_voice_only.mp4"
+    output_path = session_dir / output_filename
+    
+    print(f"[RENDER] Starting voice-only render for {video_name}")
+    print(f"[RENDER] Input: {video_path}")
+    print(f"[RENDER] Output: {output_path}")
+    print(f"[RENDER] Narrations: {len(narrations)}")
+    
+    # Fix WebM file metadata
+    fixed_video_path = session_dir / f"{video_name}_fixed.webm"
+    print(f"[RENDER] Fixing WebM metadata...")
+    try:
+        from moviepy.config import get_setting
+        ffmpeg_binary = get_setting("FFMPEG_BINARY")
+        
+        subprocess.run([
+            ffmpeg_binary, '-i', str(video_path),
+            '-c', 'copy',
+            '-y',
+            str(fixed_video_path)
+        ], check=True, capture_output=True)
+        
+        video_path = fixed_video_path
+        print(f"[RENDER] Fixed video: {fixed_video_path}")
+    except Exception as e:
+        print(f"[RENDER] Warning: Could not fix WebM metadata: {e}")
+        print(f"[RENDER] Continuing with original file...")
+    
+    # Load video
+    video = VideoFileClip(str(video_path), audio=True, fps_source='fps')
+    video_duration = video.duration
+    
+    print(f"[RENDER] Video duration: {video_duration}s")
+    
+    # Build segments
+    segments = []
+    current_time = 0
+    
+    for i, narr in enumerate(narrations):
+        click_time = narr['click_time']
+        narration_duration = narr['audio_duration']
+        
+        print(f"[RENDER] Processing click {i+1}/{len(narrations)} at {click_time:.2f}s, narration: {narration_duration:.2f}s")
+        
+        # 1. Add normal video segment from current_time to click_time
+        if click_time > current_time:
+            segment = video.subclip(current_time, click_time)
+            segments.append(segment)
+            print(f"  → Segment {len(segments)}: Normal video {current_time:.2f}s → {click_time:.2f}s")
+        
+        # 2. Freeze frame at click_time and play narration
+        frame = video.get_frame(click_time)
+        frozen_clip = ImageClip(frame, duration=narration_duration)
+        frozen_clip = frozen_clip.set_fps(video.fps)
+        
+        # 3. Add narration audio to frozen frame
+        audio_file = session_dir / f"{video_name}_narration_{i}.mp3"
+        if audio_file.exists():
+            narration_audio = AudioFileClip(str(audio_file))
+            frozen_clip = frozen_clip.set_audio(narration_audio)
+            print(f"  → Segment {len(segments)+1}: Frozen frame for {narration_duration:.2f}s with narration")
+        else:
+            print(f"  → WARNING: Audio file not found: {audio_file}")
+        
+        segments.append(frozen_clip)
+        
+        # 4. Update current_time to resume after the click point
+        current_time = click_time
+    
+    # 5. Add remaining video after last click
+    if current_time < video_duration:
+        segment = video.subclip(current_time, video_duration)
+        segments.append(segment)
+        print(f"[RENDER] Segment {len(segments)}: Final video {current_time:.2f}s → {video_duration:.2f}s")
+    
+    # Concatenate all segments
+    print(f"[RENDER] Concatenating {len(segments)} segments...")
+    final_video = concatenate_videoclips(segments, method="compose")
+    
+    # Write output
+    print(f"[RENDER] Writing output video...")
+    final_video.write_videofile(
+        str(output_path),
+        codec='libx264',
+        audio_codec='aac',
+        temp_audiofile=str(session_dir / 'temp-audio.m4a'),
+        remove_temp=True,
+        logger=None
+    )
+    
+    # Close clips
+    video.close()
+    final_video.close()
+    for seg in segments:
+        if hasattr(seg, 'close'):
+            seg.close()
+    
+    print(f"[RENDER] Voice-only render complete: {output_filename}")
+    return output_filename
+
+
 @app.get('/')
 async def home():
     """
@@ -671,11 +777,15 @@ async def process_render_job(
             print(f"[RENDER JOB {job_id}] Voice-only render complete: {output_filename}")
             
         elif mode == "full":
-            jobs[job_id].update({
-                "status": "error",
-                "progress": 0,
-                "message": "Full annotations mode not yet implemented"
-            })
+            jobs[job_id].update({"progress": 30, "message": "Processing video segments with annotations..."})
+            output_filename = render_voice_with_annotations(
+                session_dir=session_dir,
+                video_filename=meta["video_filename"],
+                video_name=meta["video_name"],
+                narrations=meta["narrations"],
+                click_locations=meta["click_data"]
+            )
+            
         else:
             jobs[job_id].update({
                 "status": "error",
