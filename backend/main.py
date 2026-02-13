@@ -4,6 +4,7 @@ import os
 import uuid
 import shutil
 import asyncio
+import subprocess
 from pathlib import Path
 from moviepy.editor import VideoFileClip, AudioFileClip, CompositeAudioClip, concatenate_videoclips, ImageClip
 from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks
@@ -29,6 +30,44 @@ VOICE_MAP = {
     "Patrick": "9Ft9sm9dzvprPILZmLJl",
     "Allison": "xctasy8XvGp2cVO9HL9k",
 }
+
+PROMPT = """You are an expert tutorial creator analyzing a screen recording to generate professional voiceover narrations.
+
+CONTEXT:
+You have a screen recording video showing a user interacting with a web application. Click events with precise timestamps have been detected and are listed below.
+
+YOUR TASK:
+1. Watch the video carefully and observe what happens at each click timestamp
+2. For each click event, create a narration that:
+   - Describes what UI element is being clicked (button, link, dropdown, input field, etc.)
+   - Explains what action or result occurs after the click
+   - Uses natural, conversational language suitable for text-to-speech voiceover
+   - Guides the viewer as if you're teaching them step-by-step
+
+NARRATION REQUIREMENTS:
+- Language: {language}
+- Tone: {style}
+- Length: 1-2 sentences per click (concise but informative)
+- Style: Use active voice and action-oriented language
+  - Good: "Click the Save button to store your changes"
+  - Bad: "The Save button is clicked and changes are stored"
+- Focus on WHAT is clicked and WHY (the outcome/purpose)
+
+DETECTED CLICK EVENTS:
+{click_summary}
+
+OUTPUT FORMAT:
+- One narration per click in chronological order
+- Include an overall summary of what the user accomplished in this tutorial
+
+EXAMPLE NARRATION:
+Instead of: "User clicks on the button"
+Write: "Click the Submit button to send your form data to the server"
+
+Instead of: "The dropdown menu is opened"
+Write: "Open the dropdown menu to select your preferred language"
+
+Now analyze the video and create professional tutorial narrations for each click event."""
 
 # Job tracking system
 jobs: Dict[str, dict] = {}  # {job_id: {status, progress, session_id, error, result}}
@@ -101,21 +140,17 @@ def generate_tts_audio(text: str, voice_name: str, output_path: str) -> float:
     audio = MP3(output_path)
     return audio.info.length
 
-
 def render_voice_only(session_dir: Path, video_filename: str, video_name: str, narrations: list) -> str:
     """
     Render a 'voice-only' video where the video freezes at each click point while narration plays.
-
-    Args:
-        session_dir: Path to the session directory containing video and audio files.
-        video_filename: Name of the input video file.
-        video_name: Base name for output and narration files.
-        narrations: List of dicts with keys 'click_time', 'audio_duration', etc.
-
-    Returns:
-        The output filename of the rendered video (str).
+    
+    Logic:
+    1. Play video normally until a click happens
+    2. Freeze the frame at the click point
+    3. Play the narration over the frozen frame
+    4. Resume video playback
+    5. Repeat for each click
     """
-    import subprocess
     
     video_path = session_dir / video_filename
     output_filename = f"{video_name}_voice_only.mp4"
@@ -152,7 +187,7 @@ def render_voice_only(session_dir: Path, video_filename: str, video_name: str, n
     
     print(f"[RENDER] Video duration: {video_duration}s")
     
-    # Build list of segments with smart freezing
+    # Build segments
     segments = []
     current_time = 0
     
@@ -160,69 +195,38 @@ def render_voice_only(session_dir: Path, video_filename: str, video_name: str, n
         click_time = narr['click_time']
         narration_duration = narr['audio_duration']
         
-        # Determine when the next click happens (or end of video)
-        if i + 1 < len(narrations):
-            next_event_time = narrations[i + 1]['click_time']
-        else:
-            next_event_time = video_duration
+        print(f"[RENDER] Processing click {i+1}/{len(narrations)} at {click_time:.2f}s, narration: {narration_duration:.2f}s")
         
-        time_gap = next_event_time - click_time
-        
-        # Add normal video segment before this click
+        # 1. Add normal video segment from current_time to click_time
         if click_time > current_time:
             segment = video.subclip(current_time, click_time)
             segments.append(segment)
-            print(f"[RENDER] Segment {len(segments)}: Normal video {current_time:.2f}s → {click_time:.2f}s")
+            print(f"  → Segment {len(segments)}: Normal video {current_time:.2f}s → {click_time:.2f}s")
         
-        # Load narration audio
+        # 2. Freeze frame at click_time and play narration
+        frame = video.get_frame(click_time)
+        frozen_clip = ImageClip(frame, duration=narration_duration)
+        frozen_clip = frozen_clip.set_fps(video.fps)
+        
+        # 3. Add narration audio to frozen frame
         audio_file = session_dir / f"{video_name}_narration_{i}.mp3"
-        narration_audio = AudioFileClip(str(audio_file)) if audio_file.exists() else None
-        
-        if narration_duration <= time_gap:
-            # Narration fits in the gap - overlay on normal video
-            segment = video.subclip(click_time, next_event_time)
-            if narration_audio:
-                # Composite narration with original video audio
-                if segment.audio:
-                    composite_audio = CompositeAudioClip([segment.audio, narration_audio])
-                    segment = segment.set_audio(composite_audio)
-                else:
-                    segment = segment.set_audio(narration_audio)
-            segments.append(segment)
-            print(f"[RENDER] Segment {len(segments)}: Normal video {click_time:.2f}s → {next_event_time:.2f}s with {narration_duration:.2f}s narration overlaid")
-            current_time = next_event_time
+        if audio_file.exists():
+            narration_audio = AudioFileClip(str(audio_file))
+            frozen_clip = frozen_clip.set_audio(narration_audio)
+            print(f"  → Segment {len(segments)+1}: Frozen frame for {narration_duration:.2f}s with narration")
         else:
-            # Narration is longer than gap - play video then freeze
-            segment = video.subclip(click_time, next_event_time)
-            if narration_audio:
-                if segment.audio:
-                    composite_audio = CompositeAudioClip([segment.audio, narration_audio])
-                    segment = segment.set_audio(composite_audio)
-                else:
-                    segment = segment.set_audio(narration_audio)
-            segments.append(segment)
-            print(f"[RENDER] Segment {len(segments)}: Normal video {click_time:.2f}s → {next_event_time:.2f}s with narration overlaid")
-            
-            # Add frozen frame for remaining narration duration
-            freeze_duration = narration_duration - time_gap
-            frame = video.get_frame(next_event_time)
-            frozen_clip = ImageClip(frame, duration=freeze_duration)
-            frozen_clip = frozen_clip.set_fps(video.fps)
-            
-            # Remaining narration audio continues on frozen frame
-            if narration_audio:
-                remaining_audio = narration_audio.subclip(time_gap, narration_duration)
-                frozen_clip = frozen_clip.set_audio(remaining_audio)
-            
-            segments.append(frozen_clip)
-            print(f"[RENDER] Segment {len(segments)}: Frozen frame for {freeze_duration:.2f}s with remaining narration")
-            current_time = next_event_time
+            print(f"  → WARNING: Audio file not found: {audio_file}")
+        
+        segments.append(frozen_clip)
+        
+        # 4. Update current_time to resume after the click point
+        current_time = click_time
     
-    # Add remaining video after last narration completes
+    # 5. Add remaining video after last click
     if current_time < video_duration:
         segment = video.subclip(current_time, video_duration)
         segments.append(segment)
-        print(f"[RENDER] Segment {len(segments)}: Normal video {current_time:.2f}s → {video_duration:.2f}s")
+        print(f"[RENDER] Segment {len(segments)}: Final video {current_time:.2f}s → {video_duration:.2f}s")
     
     # Concatenate all segments
     print(f"[RENDER] Concatenating {len(segments)} segments...")
@@ -306,36 +310,48 @@ async def process_analysis_job(
         video_name = Path(video_filename).stem.replace(" ", "_")
         print(f"[JOB {job_id}] Video name for narrations: {video_name}")
         
-        # Calculate relative click times from timestamps
+        # Calculate/normalize click times
         from datetime import datetime
+
+        def parse_iso(ts: str | None):
+            if not ts:
+                return None
+            try:
+                return datetime.fromisoformat(ts.replace('Z', '+00:00'))
+            except Exception:
+                return None
+
         if click_data and len(click_data) > 0:
-            # Get first timestamp as reference point (t=0)
-            first_timestamp_str = click_data[0].get('timestamp')
-            if first_timestamp_str:
-                first_timestamp = datetime.fromisoformat(first_timestamp_str.replace('Z', '+00:00'))
-                
-                # Calculate relative time for each click
-                for click in click_data:
-                    timestamp_str = click.get('timestamp')
-                    if timestamp_str:
-                        current_timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
-                        # Calculate difference in seconds with 3 decimal places
-                        click_time_seconds = round((current_timestamp - first_timestamp).total_seconds(), 3)
-                        click['clickTime'] = click_time_seconds
-                    else:
-                        click['clickTime'] = 0.0
-                
-                print(f"[JOB {job_id}] Calculated relative click times for {len(click_data)} clicks")
-                
-                # Filter out clicks at time 0.0 (first click that starts the recording)
-                original_count = len(click_data)
-                click_data = [c for c in click_data if c.get('clickTime', 0.0) > 0.0]
-                if original_count != len(click_data):
-                    print(f"[JOB {job_id}] Filtered out {original_count - len(click_data)} click(s) at t=0.0s")
-            else:
-                # No timestamps, default all to 0.0
-                for click in click_data:
+            # Establish the earliest timestamp (if any) for fallback calculations
+            parsed_ts = [parse_iso(c.get('timestamp')) for c in click_data if c.get('timestamp')]
+            first_ts = min(parsed_ts) if parsed_ts else None
+
+            click_time_from_recorder = 0
+            click_time_from_ts = 0
+            click_time_missing = 0
+
+            for click in click_data:
+                ct = click.get('clickTime')
+                if isinstance(ct, (int, float)):
+                    click['clickTime'] = round(max(0.0, float(ct)), 3)
+                    click_time_from_recorder += 1
+                    continue
+
+                ts = parse_iso(click.get('timestamp'))
+                if ts and first_ts:
+                    click['clickTime'] = round((ts - first_ts).total_seconds(), 3)
+                    click_time_from_ts += 1
+                else:
                     click['clickTime'] = 0.0
+                    click_time_missing += 1
+
+            # Sort by clickTime to ensure chronological order
+            click_data.sort(key=lambda c: c.get('clickTime', 0.0))
+
+            print(
+                f"[JOB {job_id}] Normalized clickTime for {len(click_data)} clicks "
+                f"(recorder={click_time_from_recorder}, timestamp_fallback={click_time_from_ts}, missing={click_time_missing})"
+            )
         else:
             print(f"[JOB {job_id}] No click data provided")
 
@@ -354,19 +370,11 @@ async def process_analysis_job(
             for i, c in enumerate(click_data)
         )
 
-        prompt = f"""You are an expert UI/UX tutorial narrator. You are given a screen recording video of a user performing actions in a web application, along with detected click events and their timestamps.
-
-Your task:
-- Watch the entire video.
-- For each click event listed below, identify exactly what UI element was clicked and what happened as a result.
-- Write a clear, natural narration for each click that would work as a voiceover in a tutorial video.
-- The narration should be in {language}, {style.lower()} tone.
-- Keep each narration concise (1-2 sentences) but descriptive enough to guide a viewer.
-
-Detected click events:
-{click_summary}
-
-Return your analysis with one entry per click in chronological order, plus an overall summary."""
+        prompt = PROMPT.format(
+            language=language,
+            style=style,
+            click_summary=click_summary
+        )
 
         message = HumanMessage(
             content=[
