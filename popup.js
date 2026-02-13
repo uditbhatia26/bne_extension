@@ -114,6 +114,12 @@ const confirmMessage = document.getElementById("confirmMessage");
 const confirmCancelBtn = document.getElementById("confirmCancelBtn");
 const confirmDeleteBtn = document.getElementById("confirmDeleteBtn");
 
+// Success modal elements
+const successModal = document.getElementById("successModal");
+const successTitle = document.getElementById("successTitle");
+const successMessage = document.getElementById("successMessage");
+const successOkBtn = document.getElementById("successOkBtn");
+
 // AI Analysis modal elements
 const aiModal = document.getElementById("aiModal");
 const aiCancelBtn = document.getElementById("aiCancelBtn");
@@ -989,13 +995,13 @@ function startJobPolling(jobId) {
         clearInterval(pollingInterval);
     }
 
-    // Poll immediately
-    pollJobStatus(jobId);
-
-    // Then poll every 2 seconds
+    // Set up interval FIRST so immediate poll can clear it if job is already complete
     pollingInterval = setInterval(() => {
         pollJobStatus(jobId);
     }, 2000);
+
+    // Then poll immediately
+    pollJobStatus(jobId);
 }
 
 async function pollJobStatus(jobId) {
@@ -1198,13 +1204,13 @@ function startRenderJobPolling(jobId, mode) {
         clearInterval(renderPollingInterval);
     }
 
-    // Poll immediately
-    pollRenderJobStatus(jobId, mode);
-
-    // Then poll every 2 seconds
+    // Set up interval FIRST so immediate poll can clear it if job is already complete
     renderPollingInterval = setInterval(() => {
         pollRenderJobStatus(jobId, mode);
     }, 2000);
+
+    // Then poll immediately
+    pollRenderJobStatus(jobId, mode);
 }
 
 async function pollRenderJobStatus(jobId, mode) {
@@ -1257,11 +1263,8 @@ async function pollRenderJobStatus(jobId, mode) {
             // Close render modal
             renderModal.classList.remove("active");
 
-            if (status.result && status.result.output_file) {
-                alert(`Video rendering complete!\\n\\nMode: ${mode}\\nFile: ${status.result.output_file}\\n\\nThe rendered video is saved in the backend sessions folder.`);
-            } else {
-                alert(`Video rendering complete!\\n\\nMode: ${mode}`);
-            }
+            // Show success modal instead of alert
+            successModal.classList.add("active");
 
             // Reset UI
             setTimeout(async () => {
@@ -1312,6 +1315,14 @@ closeVideoBtn.addEventListener("click", () => {
     videoModal.classList.remove("active");
     videoPlayer.pause();
     videoPlayer.src = "";
+});
+
+// Handle success modal OK button
+successOkBtn.addEventListener("click", async () => {
+    successModal.classList.remove("active");
+    // Clear pending session from storage after user acknowledges success
+    await chrome.storage.local.remove("pendingSession");
+    console.log("Pending session cleared after user confirmation");
 });
 
 // Clear all recordings
