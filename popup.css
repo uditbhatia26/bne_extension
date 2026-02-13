@@ -690,6 +690,91 @@ body {
     box-shadow: 0 6px 20px rgba(239, 83, 80, 0.3);
 }
 
+/* Success Modal */
+.success-modal {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: linear-gradient(180deg, rgba(26, 26, 46, 0.98) 0%, rgba(22, 33, 62, 0.98) 100%);
+    backdrop-filter: blur(20px);
+    z-index: 104;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    padding: 24px;
+}
+
+.success-modal.active {
+    display: flex;
+    animation: fadeIn 0.2s ease-out;
+}
+
+.success-modal .success-icon {
+    width: 64px;
+    height: 64px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 36px;
+    color: #fff;
+    margin-bottom: 20px;
+    animation: scaleIn 0.4s ease-out;
+}
+
+@keyframes scaleIn {
+    0% {
+        transform: scale(0);
+    }
+
+    50% {
+        transform: scale(1.1);
+    }
+
+    100% {
+        transform: scale(1);
+    }
+}
+
+.success-modal h2 {
+    font-size: 18px;
+    font-weight: 700;
+    text-align: center;
+    margin-bottom: 10px;
+    color: #fff;
+}
+
+.success-modal p {
+    font-size: 13px;
+    text-align: center;
+    color: rgba(255, 255, 255, 0.6);
+    margin-bottom: 24px;
+}
+
+.success-modal .success-btn {
+    width: 100%;
+    max-width: 200px;
+    padding: 12px 24px;
+    border: none;
+    border-radius: 12px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+    background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+    color: #fff;
+    box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
+}
+
+.success-modal .success-btn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px rgba(16, 185, 129, 0.4);
+}
+
 /* Light Theme */
 body.light {
     background: linear-gradient(180deg, #f8fafc 0%, #e2e8f0 100%);
@@ -975,6 +1060,19 @@ body.light .confirm-modal .confirm-delete {
 body.light .confirm-modal .confirm-delete:hover {
     background: linear-gradient(135deg, rgba(239, 68, 68, 0.25) 0%, rgba(239, 68, 68, 0.15) 100%);
     box-shadow: 0 6px 20px rgba(239, 68, 68, 0.2);
+}
+
+/* Light mode - Success Modal */
+body.light .success-modal {
+    background: linear-gradient(180deg, rgba(248, 250, 252, 0.98) 0%, rgba(241, 245, 249, 0.98) 100%);
+}
+
+body.light .success-modal h2 {
+    color: #1e293b;
+}
+
+body.light .success-modal p {
+    color: rgba(30, 41, 59, 0.6);
 }
 
 /* AI Analysis Modal */
