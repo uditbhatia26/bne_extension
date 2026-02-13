@@ -398,6 +398,7 @@ function renderRecordings(recordings) {
     const framesIcon = `<svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V5h14v14zm-5-7l-3 3.72L9 13l-3 4h12l-4-5z"/></svg>`;
     const deleteIcon = `<svg viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>`;
     const renderIcon = `<svg viewBox="0 0 24 24"><path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/></svg>`;
+    const uploadIcon = `<svg viewBox="0 0 24 24"><path d="M9 16h6v-6h4l-7-7-7 7h4zm-4 2h14v2H5z"/></svg>`;
 
     // Helper to generate recording item HTML
     const createRecordingItem = (rec, isAnalyzed) => {
@@ -421,6 +422,7 @@ function renderRecordings(recordings) {
                         <div class="rec-actions">
                             <button class="play-btn" data-id="${rec.id}" title="Play">${playIcon}</button>
                             <button class="render-btn" data-id="${rec.id}" data-session="${rec.session_id}" title="Render Video">${renderIcon}</button>
+                            <button class="upload-btn" data-id="${rec.id}" data-session="${rec.session_id}" title="Upload to Server">${uploadIcon}</button>
                             <button class="download-btn" data-id="${rec.id}" title="Download Analyzed">${downloadIcon}</button>
                             <button class="delete-btn" data-id="${rec.id}" title="Delete">${deleteIcon}</button>
                         </div>
@@ -513,6 +515,15 @@ function renderRecordings(recordings) {
                 currentAiRecordingId = recId;
                 renderModal.classList.add("active");
             }
+        });
+    });
+
+    // Event listeners specific to analyzed recordings (upload button)
+    analyzedList.querySelectorAll(".upload-btn").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+            const recId = parseInt(btn.dataset.id);
+            const sessionId = btn.dataset.session;
+            await uploadRecording(recId, sessionId);
         });
     });
 
@@ -621,6 +632,157 @@ async function downloadRecording(id) {
         }
     } catch (err) {
         console.error("Failed to download recording:", err);
+    }
+}
+
+async function uploadRecording(id, sessionId) {
+    /**
+     * Uploads the analyzed video to a central server
+     * 
+     * IMPLEMENTATION NOTES - What you need to add to fully implement this:
+     * 
+     * 1. CENTRAL SERVER SETUP:
+     *    - Set up a central server endpoint (e.g., https://your-domain.com/api/videos/upload)
+     *    - Add authentication/authorization (API keys, JWT tokens, OAuth)
+     *    - Configure CORS to allow requests from the extension
+     *    - Set up file storage (S3, Cloud Storage, or local file system)
+     *    - Add database to track uploaded videos with metadata
+     * 
+     * 2. BACKEND CHANGES (main.py):
+     *    - Add a new endpoint: POST /upload/{session_id}
+     *    - This endpoint should:
+     *      a) Read the rendered video file from sessions/{session_id}/
+     *      b) Read the meta.json for video metadata
+     *      c) Forward the video + metadata to your central server
+     *      d) Return upload confirmation with public URL
+     *    - Optional: Add endpoint to check upload status for large files
+     * 
+     * 3. FRONTEND CHANGES (this file):
+     *    - Show loading state on the upload button during upload
+     *    - Add progress bar for upload (if backend supports chunked upload)
+     *    - Store the public URL in the recording object after successful upload
+     *    - Add a "Share" or "View Online" button after upload completes
+     *    - Handle errors (network failures, server errors, file too large)
+     *    - Optional: Add a modal to show upload progress and get shareable link
+     * 
+     * 4. INDEXEDDB SCHEMA UPDATE (db.js):
+     *    - Add new fields to recording object:
+     *      - upload_url: string (the public URL of the uploaded video)
+     *      - uploaded_at: timestamp (when the upload completed)
+     *      - upload_status: 'pending' | 'uploading' | 'completed' | 'failed'
+     * 
+     * 5. SECURITY CONSIDERATIONS:
+     *    - Validate file size before upload (set max limit)
+     *    - Add user authentication if required
+     *    - Sanitize filenames to prevent path traversal
+     *    - Implement rate limiting to prevent abuse
+     *    - Consider encrypting sensitive video content
+     *    - Add terms of service acceptance for uploads
+     * 
+     * 6. ERROR HANDLING:
+     *    - Network timeout (large file uploads)
+     *    - Server rejecting file (too large, wrong format)
+     *    - Authentication failures
+     *    - Quota exceeded (if user has storage limits)
+     * 
+     * 7. USER EXPERIENCE IMPROVEMENTS:
+     *    - Show estimated upload time based on file size
+     *    - Allow cancelling upload in progress
+     *    - Show success message with shareable link
+     *    - Add copy-to-clipboard button for the public URL
+     *    - Show upload history/status in a separate section
+     * 
+     * EXAMPLE IMPLEMENTATION FLOW:
+     * 
+     * const response = await fetch(`http://localhost:8000/upload/${sessionId}`, {
+     *     method: 'POST',
+     *     headers: {
+     *         'Authorization': 'Bearer YOUR_API_KEY',
+     *         'Content-Type': 'application/json'
+     *     },
+     *     body: JSON.stringify({
+     *         user_id: 'user123',
+     *         visibility: 'public' // or 'private'
+     *     })
+     * });
+     * 
+     * const result = await response.json();
+     * // result.public_url = "https://your-cdn.com/videos/abc123.mp4"
+     * 
+     * // Update recording in IndexedDB with the public URL
+     * await window.RecordingsDB.updateRecording(id, {
+     *     upload_url: result.public_url,
+     *     uploaded_at: new Date().toISOString(),
+     *     upload_status: 'completed'
+     * });
+     * 
+     * @param {number} id - Recording ID from IndexedDB
+     * @param {string} sessionId - Session ID from backend analysis
+     */
+
+    try {
+        console.log(`[UPLOAD] Dummy upload initiated for recording ${id}, session ${sessionId}`);
+
+        // TODO: Uncomment and implement when central server is ready
+        /*
+        const recording = await window.RecordingsDB.getRecording(id);
+        if (!recording || !recording.output_file) {
+            console.error("No rendered video available to upload");
+            alert("Please render the video first before uploading");
+            return;
+        }
+
+        // Show loading state
+        const uploadBtn = document.querySelector(`.upload-btn[data-id="${id}"]`);
+        if (uploadBtn) {
+            uploadBtn.disabled = true;
+            uploadBtn.innerHTML = '⏳'; // Loading icon
+        }
+
+        // Call backend upload endpoint
+        const response = await fetch(`http://localhost:8000/upload/${sessionId}`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                recording_id: id,
+                video_name: recording.name
+            })
+        });
+
+        if (!response.ok) {
+            throw new Error(`Upload failed: ${response.statusText}`);
+        }
+
+        const result = await response.json();
+        
+        // Update recording with upload info
+        await window.RecordingsDB.updateRecording(id, {
+            upload_url: result.public_url,
+            uploaded_at: new Date().toISOString(),
+            upload_status: 'completed'
+        });
+
+        // Show success message
+        alert(`Upload successful! Public URL: ${result.public_url}`);
+        
+        // Restore button state
+        if (uploadBtn) {
+            uploadBtn.disabled = false;
+            uploadBtn.innerHTML = uploadIcon;
+        }
+
+        // Refresh the list to show updated state
+        loadRecordings();
+        */
+
+        // For now, just show a message
+        alert(`Upload feature coming soon!\n\nRecording ID: ${id}\nSession ID: ${sessionId}\n\nSee uploadRecording() function comments for implementation details.`);
+
+    } catch (err) {
+        console.error("Failed to upload recording:", err);
+        alert("Upload failed: " + err.message);
     }
 }
 
