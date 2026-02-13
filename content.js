@@ -63,6 +63,10 @@ if (window.__clickDetectorLoaded) {
                 targetClass: event.target.className || "",
                 timestamp: new Date().toISOString(),
                 url: window.location.href,
+                scrollX: window.scrollX,
+                scrollY: window.scrollY,
+                viewportWidth: window.innerWidth,
+                viewportHeight: window.innerHeight,
             };
 
             console.log(
