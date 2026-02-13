@@ -72,16 +72,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 return;
             }
 
-            // Capture frame for this click
+            // Capture frame for this click and grab an accurate clickTime from offscreen (aligned to recording start)
+            let clickTimeFromCapture = undefined;
             try {
-                await chrome.runtime.sendMessage({
+                const frameResp = await chrome.runtime.sendMessage({
                     type: "CAPTURE_FRAME",
                     target: "offscreen",
                     clickData: message.data,
                 });
+                clickTimeFromCapture = frameResp?.frameData?.clickTime;
                 console.log("[Background] Frame captured for click");
             } catch (err) {
                 console.log("[Background] Could not capture frame:", err.message);
+            }
+
+            // Persist the click with the captured relative time when available
+            if (typeof clickTimeFromCapture === "number" && Number.isFinite(clickTimeFromCapture)) {
+                message.data.clickTime = clickTimeFromCapture;
             }
 
             // Retrieve existing clicks, append, and trim
