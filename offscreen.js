@@ -65,7 +65,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 async function startCapture(streamId, mode) {
     currentMode = mode || "tab";
     capturedFrames = []; // Reset frames for new recording
-    recordingStartTime = Date.now(); // Track when recording started
     let stream;
 
     if (mode === "screen") {
@@ -112,6 +111,7 @@ async function startCapture(streamId, mode) {
     };
 
     mediaRecorder.start(1000); // Collect data every second
+    recordingStartTime = Date.now(); // Track when recording actually started
     console.log("[Offscreen] Recording started in mode:", mode);
 }
 
