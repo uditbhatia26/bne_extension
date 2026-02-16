@@ -15,6 +15,8 @@ from langchain_core.messages import HumanMessage
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 import cv2
+import time
+import httpx
 from typing import Annotated, Dict
 from elevenlabs import ElevenLabs
 import numpy as np
@@ -847,6 +849,247 @@ async def process_render_job(
             "error": error_msg
         })
 
+
+
+CENTRAL_API_URL = "http://127.0.0.1:8002/api/kits"
+
+
+@app.post('/upload/{session_id}')
+async def upload_to_central(session_id: str):
+    """
+    Upload an analyzed session as a kit to the central website.
+    
+    Extracts frames at each click point (non-annotated), computes
+    cursor coordinates with offset and zoom level, builds the kit
+    schema, and POSTs it to the central API.
+
+    Args:
+        session_id: The session identifier to upload.
+
+    Returns:
+        JSON with status and the response from the central API.
+    """
+    session_dir = SESSIONS_DIR / session_id
+    if not session_dir.exists():
+        return {"status": "error", "message": "Session not found."}
+
+    meta_path = session_dir / "meta.json"
+    if not meta_path.exists():
+        return {"status": "error", "message": "Session metadata not found. Run /analyze first."}
+
+    meta = json.loads(meta_path.read_text())
+    
+    video_filename = meta["video_filename"]
+    video_name = meta.get("video_name", "Untitled Kit")
+    narrations = meta.get("narrations", [])
+    click_data = meta.get("click_data", [])
+    
+    if not narrations or not click_data:
+        return {"status": "error", "message": "No narrations or click data found in session."}
+    
+    # --- Load video and extract frames ---
+    video_path = session_dir / video_filename
+    
+    # Use fixed WebM if available
+    fixed_video_path = session_dir / f"{video_name}_fixed.webm"
+    if fixed_video_path.exists():
+        video_path = fixed_video_path
+    
+    if not video_path.exists():
+        return {"status": "error", "message": f"Video file not found: {video_filename}"}
+    
+    print(f"[UPLOAD] Starting upload for session {session_id}")
+    print(f"[UPLOAD] Video: {video_path}, Narrations: {len(narrations)}, Clicks: {len(click_data)}")
+    
+    # Get zoom level and compute y_offset (same logic as render_voice_with_annotations)
+    zoom_level = click_data[0].get('zoomLevel', 1.0) if click_data else 1.0
+    y_offset = 114 * zoom_level
+    
+    # Fix WebM metadata first (same as render pipeline)
+    fixed_video_path = session_dir / f"{video_name}_fixed.webm"
+    if not fixed_video_path.exists():
+        try:
+            from moviepy.config import get_setting
+            ffmpeg_binary = get_setting("FFMPEG_BINARY")
+            subprocess.run([
+                ffmpeg_binary, '-i', str(video_path),
+                '-c', 'copy', '-y',
+                str(fixed_video_path)
+            ], check=True, capture_output=True)
+            print(f"[UPLOAD] Fixed WebM metadata: {fixed_video_path}")
+        except Exception as e:
+            print(f"[UPLOAD] Warning: Could not fix WebM metadata: {e}")
+            fixed_video_path = video_path
+    
+    # Use MoviePy for reliable frame extraction (same as render functions)
+    video = VideoFileClip(str(fixed_video_path), audio=False, fps_source='fps')
+    frame_width = video.size[0]
+    frame_height = video.size[1]
+    video_duration = video.duration
+    
+    print(f"[UPLOAD] Video: {frame_width}x{frame_height}, duration: {video_duration}s")
+    
+    # Build screens - one per click/narration
+    num = min(len(narrations), len(click_data))
+    screens = []
+    now_ms = int(time.time() * 1000)
+    
+    for i in range(num):
+        narr = narrations[i]
+        click = click_data[i]
+        click_time = narr.get("click_time", 0.0)
+        
+        # Clamp click_time to valid range
+        click_time = max(0, min(click_time, video_duration - 0.01))
+        
+        # Extract frame using MoviePy (RGB numpy array)
+        frame_rgb = video.get_frame(click_time)
+        
+        # Convert RGB to BGR for OpenCV annotation & encoding
+        frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+        
+        # Compute cursor coordinates with offset and zoom level
+        cursor_x = int(click.get('clientX', 0))
+        cursor_y = int(click.get('clientY', 0)) + int(y_offset)
+        
+        # Draw rectangle annotation (same as render_voice_with_annotations)
+        rect_size = 60
+        rect_color = (0, 255, 0)  # Green in BGR
+        rect_thickness = 3
+        
+        x1 = int(cursor_x - rect_size // 2)
+        y1 = int(cursor_y - rect_size // 2)
+        x2 = int(cursor_x + rect_size // 2)
+        y2 = int(cursor_y + rect_size // 2)
+        
+        cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), rect_color, rect_thickness)
+        
+        # Encode annotated frame as base64 PNG
+        _, buffer = cv2.imencode('.png', frame_bgr)
+        frame_b64 = base64.b64encode(buffer).decode('utf-8')
+        frame_data_url = f"data:image/png;base64,{frame_b64}"
+        
+        print(f"[UPLOAD] Frame {i+1}/{num}: extracted at {click_time:.2f}s, cursor at ({cursor_x}, {cursor_y}), size: {len(frame_b64)} chars")
+        
+        # Upload narration audio to central API
+        audio_file = session_dir / f"{video_name}_narration_{i}.mp3"
+        audio_url = ""
+        audio_duration_ms = 0
+        screen_id = f"screen_{session_id}_{i}"
+        
+        if audio_file.exists():
+            audio_duration_ms = int(narr.get("audio_duration", 0) * 1000)
+            try:
+                async with httpx.AsyncClient(timeout=60.0) as http_client:
+                    with open(audio_file, "rb") as f:
+                        response = await http_client.post(
+                            f"{CENTRAL_API_URL.replace('/api/kits', '')}/api/screens/audio",
+                            data={"screen_id": screen_id},
+                            files={"audio": (audio_file.name, f, "audio/mpeg")}
+                        )
+                
+                if response.status_code in (200, 201):
+                    audio_result = response.json()
+                    audio_url = audio_result.get("audio_url", "")
+                    print(f"[UPLOAD] Audio {i+1}/{num}: uploaded → {audio_url}")
+                else:
+                    print(f"[UPLOAD] WARNING: Audio upload failed for screen {i}: {response.status_code} - {response.text}")
+            except Exception as e:
+                print(f"[UPLOAD] WARNING: Audio upload error for screen {i}: {e}")
+        
+        screen = {
+            "id": f"screen_{session_id}_{i}",
+            "name": narr.get("ui_element", f"Step {i + 1}"),
+            "width": frame_width,
+            "height": frame_height,
+            "backgroundColor": "#000000",
+            "backgroundImage": frame_data_url,
+            "audioUrl": audio_url,
+            "audioText": narr.get("narration_text", ""),
+            "audioLanguage": meta.get("language", "en"),
+            "audioDuration": audio_duration_ms,
+            "screenDuration": max(audio_duration_ms, 5000),
+            "autoNext": True,
+            "elements": [
+                {
+                    "id": f"cursor_{session_id}_{i}",
+                    "type": "cursor",
+                    "x": cursor_x,
+                    "y": cursor_y,
+                    "width": 40,
+                    "height": 40,
+                    "backgroundColor": "transparent",
+                    "opacity": 1,
+                    "borderWidth": 0,
+                    "borderColor": "transparent",
+                    "action": "click",
+                }
+            ]
+        }
+        screens.append(screen)
+        print(f"[UPLOAD] Screen {i+1}/{num}: click at ({cursor_x}, {cursor_y}), audio: {audio_duration_ms}ms")
+    
+    video.close()
+    
+    if not screens:
+        return {"status": "error", "message": "No screens could be created from the session data."}
+    
+    # Generate thumbnail from the first screen's frame
+    thumbnail = screens[0]["backgroundImage"] if screens else ""
+    
+    # Build the kit payload
+    kit_payload = {
+        "id": session_id,
+        "title": meta.get("video_name", "Untitled Kit").replace("_", " ").title(),
+        "thumbnail": thumbnail,
+        "createdAt": now_ms,
+        "updatedAt": now_ms,
+        "userId": 3,
+        "published": False,
+        "publishedKitId": "",
+        "screens": screens,
+    }
+    
+    print(f"[UPLOAD] Kit payload built: {len(screens)} screens, title: {kit_payload['title']}")
+    
+    # POST to central API
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            response = await client.post(
+                CENTRAL_API_URL,
+                json=kit_payload,
+                headers={"Content-Type": "application/json"}
+            )
+        
+        print(f"[UPLOAD] Central API response: {response.status_code}")
+        
+        if response.status_code in (200, 201):
+            result = response.json()
+            print(f"[UPLOAD] Upload successful: {result}")
+            return {
+                "status": "ok",
+                "message": "Kit uploaded successfully!",
+                "central_response": result
+            }
+        else:
+            error_text = response.text
+            print(f"[UPLOAD] Upload failed: {response.status_code} - {error_text}")
+            return {
+                "status": "error",
+                "message": f"Central API returned {response.status_code}: {error_text}"
+            }
+    except httpx.ConnectError:
+        print(f"[UPLOAD] Could not connect to central API at {CENTRAL_API_URL}")
+        return {
+            "status": "error",
+            "message": f"Could not connect to central API at {CENTRAL_API_URL}. Is the server running?"
+        }
+    except Exception as e:
+        print(f"[UPLOAD] Error uploading to central API: {e}")
+        return {
+            "status": "error",
+            "message": f"Upload failed: {str(e)}"
+        }
 
 
 @app.get('/download/{session_id}/{filename}')
