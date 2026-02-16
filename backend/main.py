@@ -14,8 +14,10 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
+import cv2
 from typing import Annotated, Dict
 from elevenlabs import ElevenLabs
+import numpy as np
 
 load_dotenv()
 
@@ -254,15 +256,21 @@ def render_voice_only(session_dir: Path, video_filename: str, video_name: str, n
     return output_filename
 
 
-
-
-def render_voice_with_annotations(session_dir: Path, video_filename: str, video_name: str, narrations: list, click_locations: list) -> str:
+def render_voice_with_annotations(session_dir: Path, video_filename: str, video_name: str, narrations: list, click_data: list) -> str:
     
     video_path = session_dir / video_filename
-    output_filename = f"{video_name}_voice_only.mp4"
+    output_filename = f"{video_name}_with_annotations.mp4"
     output_path = session_dir / output_filename
+
+    click_data = click_data
+
+    # Get zoom level from meta.json
+    zoom_level = click_data[0].get('zoomLevel', 1.0) if click_data else 1.0
     
-    print(f"[RENDER] Starting voice-only render for {video_name}")
+    # Calculate y_offset based on zoom level
+    y_offset = 114 * zoom_level    
+    
+    print(f"[RENDER] Starting voice with annotation render for {video_name}")
     print(f"[RENDER] Input: {video_path}")
     print(f"[RENDER] Output: {output_path}")
     print(f"[RENDER] Narrations: {len(narrations)}")
@@ -309,9 +317,31 @@ def render_voice_with_annotations(session_dir: Path, video_filename: str, video_
             segments.append(segment)
             print(f"  → Segment {len(segments)}: Normal video {current_time:.2f}s → {click_time:.2f}s")
         
-        # 2. Freeze frame at click_time and play narration
+        # 2. Freeze frame at click_time and play narration # Freeze the frame, add annotations, and then play narration
         frame = video.get_frame(click_time)
-        frozen_clip = ImageClip(frame, duration=narration_duration)
+        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+
+
+        # Get click coordinates from click_data
+        click = click_data[i]
+        x = int(click['clientX'])
+        y = int(click['clientY']) + int(y_offset)    
+
+        # Draw rectangle annotation
+        rect_size = 60
+        rect_color = (0, 255, 0)  # Green in BGR
+        rect_thickness = 3    
+
+        x1 = int(x - rect_size // 2)
+        y1 = int(y - rect_size // 2)
+        x2 = int(x + rect_size // 2)
+        y2 = int(y + rect_size // 2)
+
+        cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), rect_color, rect_thickness)
+
+        frame_annotated = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+
+        frozen_clip = ImageClip(frame_annotated, duration=narration_duration)
         frozen_clip = frozen_clip.set_fps(video.fps)
         
         # 3. Add narration audio to frozen frame
@@ -783,8 +813,20 @@ async def process_render_job(
                 video_filename=meta["video_filename"],
                 video_name=meta["video_name"],
                 narrations=meta["narrations"],
-                click_locations=meta["click_data"]
+                click_data=meta["click_data"]
             )
+            
+            jobs[job_id].update({
+                "status": "complete",
+                "progress": 100,
+                "message": "Render complete!",
+                "result": {
+                    "session_id": session_id,
+                    "mode": mode,
+                    "output_file": output_filename
+                }
+            })
+            print(f"[RENDER JOB {job_id}] Full annotations render complete: {output_filename}")
             
         else:
             jobs[job_id].update({

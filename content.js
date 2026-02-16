@@ -67,6 +67,8 @@ if (window.__clickDetectorLoaded) {
                 scrollY: window.scrollY,
                 viewportWidth: window.innerWidth,
                 viewportHeight: window.innerHeight,
+                devicePixelRatio: window.devicePixelRatio,
+                zoomLevel: window.devicePixelRatio / (window.outerWidth / window.innerWidth)
             };
 
             console.log(
