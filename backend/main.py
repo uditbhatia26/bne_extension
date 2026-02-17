@@ -144,21 +144,105 @@ def generate_tts_audio(text: str, voice_name: str, output_path: str) -> float:
     audio = MP3(output_path)
     return audio.info.length
 
-def render_voice_only(session_dir: Path, video_filename: str, video_name: str, narrations: list) -> str:
+# --- Zoom helpers (from zoom_testing.py) ---
+
+ZOOM_SCALE = 1.15
+ZOOM_IN_DURATION = 0.4
+ZOOM_OUT_DURATION = 0.5
+EASING_POWER = 1.5
+
+
+def ease_in_out(x):
+    """Smooth easing curve for natural zoom animation."""
+    return x ** EASING_POWER
+
+
+def zoom_at_point(frame, scale, cx, cy):
     """
-    Render a 'voice-only' video where the video freezes at each click point while narration plays.
+    Apply zoom centered around a specific (x, y) point.
+    Crops a smaller area based on scale and resizes back to original resolution.
+    """
+    h, w = frame.shape[:2]
+    new_w = int(w / scale)
+    new_h = int(h / scale)
+    
+    x1 = int(cx - new_w / 2)
+    y1 = int(cy - new_h / 2)
+    
+    # Clamp to frame boundaries
+    x1 = max(0, min(x1, w - new_w))
+    y1 = max(0, min(y1, h - new_h))
+    
+    cropped = frame[y1:y1 + new_h, x1:x1 + new_w]
+    resized = cv2.resize(cropped, (w, h), interpolation=cv2.INTER_LINEAR)
+    return resized
+
+
+def make_zoom_clip(frame_rgb, cx, cy, narration_duration, fps, annotate=False):
+    """
+    Create an animated clip that zooms in on (cx, cy), holds during narration, then zooms out.
+    
+    Structure:
+        [zoom_in: 0.25s] -> [hold_zoomed: narration_duration] -> [zoom_out: 0.35s]
+    """
+    total_duration = ZOOM_IN_DURATION + narration_duration + ZOOM_OUT_DURATION
+    
+    # Optionally annotate the frame
+    if annotate:
+        frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+        rect_size = 60
+        x1 = int(cx - rect_size // 2)
+        y1 = int(cy - rect_size // 2)
+        x2 = int(cx + rect_size // 2)
+        y2 = int(cy + rect_size // 2)
+        cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), (0, 255, 0), 3)
+        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+    
+    def make_frame(t):
+        # Phase 1: Zoom in
+        if t <= ZOOM_IN_DURATION:
+            progress = t / ZOOM_IN_DURATION if ZOOM_IN_DURATION > 0 else 1.0
+            scale = 1.0 + (ZOOM_SCALE - 1.0) * ease_in_out(progress)
+        # Phase 2: Hold zoomed
+        elif t <= ZOOM_IN_DURATION + narration_duration:
+            scale = ZOOM_SCALE
+        # Phase 3: Zoom out
+        else:
+            elapsed = t - ZOOM_IN_DURATION - narration_duration
+            progress = elapsed / ZOOM_OUT_DURATION if ZOOM_OUT_DURATION > 0 else 1.0
+            progress = min(progress, 1.0)
+            scale = ZOOM_SCALE - (ZOOM_SCALE - 1.0) * ease_in_out(progress)
+        
+        if scale > 1.001:
+            return zoom_at_point(frame_rgb, scale, cx, cy)
+        return frame_rgb
+    
+    from moviepy.editor import VideoClip
+    clip = VideoClip(make_frame, duration=total_duration)
+    clip = clip.set_fps(fps)
+    return clip
+
+
+def render_voice_only(session_dir: Path, video_filename: str, video_name: str, narrations: list, click_data: list) -> str:
+    """
+    Render a 'voice-only' video with zoom animation at each click point.
     
     Logic:
     1. Play video normally until a click happens
-    2. Freeze the frame at the click point
-    3. Play the narration over the frozen frame
-    4. Resume video playback
-    5. Repeat for each click
+    2. Zoom in on cursor coordinates when narration starts
+    3. Hold zoomed while narration plays
+    4. Zoom out when narration ends
+    5. Resume normal video playback
+    6. Repeat for each click
     """
     
     video_path = session_dir / video_filename
     output_filename = f"{video_name}_voice_only.mp4"
     output_path = session_dir / output_filename
+    
+    # Get zoom level from click_data for y_offset
+    zoom_level = click_data[0].get('zoomLevel', 1.0) if click_data else 1.0
+    y_offset = 114 * zoom_level
     
     print(f"[RENDER] Starting voice-only render for {video_name}")
     print(f"[RENDER] Input: {video_path}")
@@ -199,7 +283,12 @@ def render_voice_only(session_dir: Path, video_filename: str, video_name: str, n
         click_time = narr['click_time']
         narration_duration = narr['audio_duration']
         
-        print(f"[RENDER] Processing click {i+1}/{len(narrations)} at {click_time:.2f}s, narration: {narration_duration:.2f}s")
+        # Get cursor coordinates
+        click = click_data[i] if i < len(click_data) else {}
+        cx = int(click.get('clientX', 0))
+        cy = int(click.get('clientY', 0)) + int(y_offset)
+        
+        print(f"[RENDER] Processing click {i+1}/{len(narrations)} at {click_time:.2f}s, narration: {narration_duration:.2f}s, cursor: ({cx}, {cy})")
         
         # 1. Add normal video segment from current_time to click_time
         if click_time > current_time:
@@ -207,21 +296,21 @@ def render_voice_only(session_dir: Path, video_filename: str, video_name: str, n
             segments.append(segment)
             print(f"  → Segment {len(segments)}: Normal video {current_time:.2f}s → {click_time:.2f}s")
         
-        # 2. Freeze frame at click_time and play narration
+        # 2. Create zoom animation clip (zoom in → hold → zoom out)
         frame = video.get_frame(click_time)
-        frozen_clip = ImageClip(frame, duration=narration_duration)
-        frozen_clip = frozen_clip.set_fps(video.fps)
+        zoom_clip = make_zoom_clip(frame, cx, cy, narration_duration, video.fps, annotate=False)
         
-        # 3. Add narration audio to frozen frame
+        # 3. Add narration audio — offset to start after zoom-in completes
         audio_file = session_dir / f"{video_name}_narration_{i}.mp3"
         if audio_file.exists():
             narration_audio = AudioFileClip(str(audio_file))
-            frozen_clip = frozen_clip.set_audio(narration_audio)
-            print(f"  → Segment {len(segments)+1}: Frozen frame for {narration_duration:.2f}s with narration")
+            narration_audio = narration_audio.set_start(ZOOM_IN_DURATION)
+            zoom_clip = zoom_clip.set_audio(CompositeAudioClip([narration_audio]))
+            print(f"  → Segment {len(segments)+1}: Zoom clip {ZOOM_IN_DURATION:.2f}s + {narration_duration:.2f}s + {ZOOM_OUT_DURATION:.2f}s with narration")
         else:
             print(f"  → WARNING: Audio file not found: {audio_file}")
         
-        segments.append(frozen_clip)
+        segments.append(zoom_clip)
         
         # 4. Update current_time to resume after the click point
         current_time = click_time
@@ -264,9 +353,7 @@ def render_voice_with_annotations(session_dir: Path, video_filename: str, video_
     output_filename = f"{video_name}_with_annotations.mp4"
     output_path = session_dir / output_filename
 
-    click_data = click_data
-
-    # Get zoom level from meta.json
+    # Get zoom level from click_data
     zoom_level = click_data[0].get('zoomLevel', 1.0) if click_data else 1.0
     
     # Calculate y_offset based on zoom level
@@ -311,7 +398,12 @@ def render_voice_with_annotations(session_dir: Path, video_filename: str, video_
         click_time = narr['click_time']
         narration_duration = narr['audio_duration']
         
-        print(f"[RENDER] Processing click {i+1}/{len(narrations)} at {click_time:.2f}s, narration: {narration_duration:.2f}s")
+        # Get click coordinates from click_data
+        click = click_data[i] if i < len(click_data) else {}
+        cx = int(click.get('clientX', 0))
+        cy = int(click.get('clientY', 0)) + int(y_offset)
+        
+        print(f"[RENDER] Processing click {i+1}/{len(narrations)} at {click_time:.2f}s, narration: {narration_duration:.2f}s, cursor: ({cx}, {cy})")
         
         # 1. Add normal video segment from current_time to click_time
         if click_time > current_time:
@@ -319,43 +411,21 @@ def render_voice_with_annotations(session_dir: Path, video_filename: str, video_
             segments.append(segment)
             print(f"  → Segment {len(segments)}: Normal video {current_time:.2f}s → {click_time:.2f}s")
         
-        # 2. Freeze frame at click_time and play narration # Freeze the frame, add annotations, and then play narration
+        # 2. Create zoom animation clip with annotation (zoom in → hold → zoom out)
         frame = video.get_frame(click_time)
-        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-
-
-        # Get click coordinates from click_data
-        click = click_data[i]
-        x = int(click['clientX'])
-        y = int(click['clientY']) + int(y_offset)    
-
-        # Draw rectangle annotation
-        rect_size = 60
-        rect_color = (0, 255, 0)  # Green in BGR
-        rect_thickness = 3    
-
-        x1 = int(x - rect_size // 2)
-        y1 = int(y - rect_size // 2)
-        x2 = int(x + rect_size // 2)
-        y2 = int(y + rect_size // 2)
-
-        cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), rect_color, rect_thickness)
-
-        frame_annotated = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-
-        frozen_clip = ImageClip(frame_annotated, duration=narration_duration)
-        frozen_clip = frozen_clip.set_fps(video.fps)
+        zoom_clip = make_zoom_clip(frame, cx, cy, narration_duration, video.fps, annotate=True)
         
-        # 3. Add narration audio to frozen frame
+        # 3. Add narration audio — offset to start after zoom-in completes
         audio_file = session_dir / f"{video_name}_narration_{i}.mp3"
         if audio_file.exists():
             narration_audio = AudioFileClip(str(audio_file))
-            frozen_clip = frozen_clip.set_audio(narration_audio)
-            print(f"  → Segment {len(segments)+1}: Frozen frame for {narration_duration:.2f}s with narration")
+            narration_audio = narration_audio.set_start(ZOOM_IN_DURATION)
+            zoom_clip = zoom_clip.set_audio(CompositeAudioClip([narration_audio]))
+            print(f"  → Segment {len(segments)+1}: Zoom clip {ZOOM_IN_DURATION:.2f}s + {narration_duration:.2f}s + {ZOOM_OUT_DURATION:.2f}s with annotation + narration")
         else:
             print(f"  → WARNING: Audio file not found: {audio_file}")
         
-        segments.append(frozen_clip)
+        segments.append(zoom_clip)
         
         # 4. Update current_time to resume after the click point
         current_time = click_time
@@ -793,7 +863,8 @@ async def process_render_job(
                 session_dir=session_dir,
                 video_filename=meta["video_filename"],
                 video_name=meta["video_name"],
-                narrations=meta["narrations"]
+                narrations=meta["narrations"],
+                click_data=meta.get("click_data", [])
             )
             
             jobs[job_id].update({
