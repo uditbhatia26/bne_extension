@@ -854,17 +854,21 @@ async def process_render_job(
 CENTRAL_API_URL = "http://127.0.0.1:8002/api/kits"
 
 
+class UploadRequest(BaseModel):
+    frames: list = []  # Pre-captured frames from the extension
+
+
 @app.post('/upload/{session_id}')
-async def upload_to_central(session_id: str):
+async def upload_to_central(session_id: str, body: UploadRequest = UploadRequest()):
     """
     Upload an analyzed session as a kit to the central website.
     
-    Extracts frames at each click point (non-annotated), computes
-    cursor coordinates with offset and zoom level, builds the kit
-    schema, and POSTs it to the central API.
+    Uses pre-captured frames from the extension (taken at the exact click moment)
+    for pixel-perfect timing. Falls back to video extraction if no frames provided.
 
     Args:
         session_id: The session identifier to upload.
+        body: Optional JSON body with pre-captured frames from IndexedDB.
 
     Returns:
         JSON with status and the response from the central API.
@@ -887,47 +891,53 @@ async def upload_to_central(session_id: str):
     if not narrations or not click_data:
         return {"status": "error", "message": "No narrations or click data found in session."}
     
-    # --- Load video and extract frames ---
-    video_path = session_dir / video_filename
-    
-    # Use fixed WebM if available
-    fixed_video_path = session_dir / f"{video_name}_fixed.webm"
-    if fixed_video_path.exists():
-        video_path = fixed_video_path
-    
-    if not video_path.exists():
-        return {"status": "error", "message": f"Video file not found: {video_filename}"}
-    
-    print(f"[UPLOAD] Starting upload for session {session_id}")
-    print(f"[UPLOAD] Video: {video_path}, Narrations: {len(narrations)}, Clicks: {len(click_data)}")
-    
     # Get zoom level and compute y_offset (same logic as render_voice_with_annotations)
     zoom_level = click_data[0].get('zoomLevel', 1.0) if click_data else 1.0
     y_offset = 114 * zoom_level
     
-    # Fix WebM metadata first (same as render pipeline)
-    fixed_video_path = session_dir / f"{video_name}_fixed.webm"
-    if not fixed_video_path.exists():
-        try:
-            from moviepy.config import get_setting
-            ffmpeg_binary = get_setting("FFMPEG_BINARY")
-            subprocess.run([
-                ffmpeg_binary, '-i', str(video_path),
-                '-c', 'copy', '-y',
-                str(fixed_video_path)
-            ], check=True, capture_output=True)
-            print(f"[UPLOAD] Fixed WebM metadata: {fixed_video_path}")
-        except Exception as e:
-            print(f"[UPLOAD] Warning: Could not fix WebM metadata: {e}")
-            fixed_video_path = video_path
+    # Pre-captured frames from the extension (taken at exact click instant)
+    precaptured_frames = body.frames or []
+    use_precaptured = len(precaptured_frames) > 0
     
-    # Use MoviePy for reliable frame extraction (same as render functions)
-    video = VideoFileClip(str(fixed_video_path), audio=False, fps_source='fps')
-    frame_width = video.size[0]
-    frame_height = video.size[1]
-    video_duration = video.duration
+    print(f"[UPLOAD] Starting upload for session {session_id}")
+    print(f"[UPLOAD] Narrations: {len(narrations)}, Clicks: {len(click_data)}, Pre-captured frames: {len(precaptured_frames)}")
     
-    print(f"[UPLOAD] Video: {frame_width}x{frame_height}, duration: {video_duration}s")
+    # Determine frame dimensions
+    video = None
+    if use_precaptured:
+        # Decode first frame to get dimensions
+        first_frame_data = precaptured_frames[0].get('image', '')
+        if first_frame_data.startswith('data:'):
+            header, b64data = first_frame_data.split(',', 1)
+            img_bytes = base64.b64decode(b64data)
+            nparr = np.frombuffer(img_bytes, np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            frame_width = img.shape[1]
+            frame_height = img.shape[0]
+        else:
+            frame_width = 1920
+            frame_height = 1080
+        print(f"[UPLOAD] Using pre-captured frames: {frame_width}x{frame_height}")
+    else:
+        # Fallback: open video for frame extraction
+        video_path = session_dir / video_filename
+        fixed_video_path = session_dir / f"{video_name}_fixed.webm"
+        if not fixed_video_path.exists():
+            try:
+                from moviepy.config import get_setting
+                ffmpeg_binary = get_setting("FFMPEG_BINARY")
+                subprocess.run([
+                    ffmpeg_binary, '-i', str(video_path),
+                    '-c', 'copy', '-y',
+                    str(fixed_video_path)
+                ], check=True, capture_output=True)
+            except Exception:
+                fixed_video_path = video_path
+        
+        video = VideoFileClip(str(fixed_video_path), audio=False, fps_source='fps')
+        frame_width = video.size[0]
+        frame_height = video.size[1]
+        print(f"[UPLOAD] Fallback: extracting frames from video: {frame_width}x{frame_height}")
     
     # Build screens - one per click/narration
     num = min(len(narrations), len(click_data))
@@ -937,20 +947,33 @@ async def upload_to_central(session_id: str):
     for i in range(num):
         narr = narrations[i]
         click = click_data[i]
-        click_time = narr.get("click_time", 0.0)
-        
-        # Clamp click_time to valid range
-        click_time = max(0, min(click_time, video_duration - 0.01))
-        
-        # Extract frame using MoviePy (RGB numpy array)
-        frame_rgb = video.get_frame(click_time)
-        
-        # Convert RGB to BGR for OpenCV annotation & encoding
-        frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
         
         # Compute cursor coordinates with offset and zoom level
         cursor_x = int(click.get('clientX', 0))
         cursor_y = int(click.get('clientY', 0)) + int(y_offset)
+        
+        if use_precaptured and i < len(precaptured_frames):
+            # Use the pre-captured frame (taken at exact click instant)
+            frame_img = precaptured_frames[i].get('image', '')
+            
+            # Decode, annotate, re-encode
+            if frame_img.startswith('data:'):
+                header, b64data = frame_img.split(',', 1)
+                img_bytes = base64.b64decode(b64data)
+                nparr = np.frombuffer(img_bytes, np.uint8)
+                frame_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            else:
+                print(f"[UPLOAD] WARNING: Frame {i} has no valid image data, skipping")
+                continue
+            
+            print(f"[UPLOAD] Frame {i+1}/{num}: using pre-captured frame, cursor at ({cursor_x}, {cursor_y})")
+        else:
+            # Fallback: extract from video
+            click_time = narr.get("click_time", 0.0)
+            click_time = max(0, min(click_time, video.duration - 0.01))
+            frame_rgb = video.get_frame(click_time)
+            frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+            print(f"[UPLOAD] Frame {i+1}/{num}: extracted from video at {click_time:.2f}s, cursor at ({cursor_x}, {cursor_y})")
         
         # Draw rectangle annotation (same as render_voice_with_annotations)
         rect_size = 60
@@ -968,8 +991,6 @@ async def upload_to_central(session_id: str):
         _, buffer = cv2.imencode('.png', frame_bgr)
         frame_b64 = base64.b64encode(buffer).decode('utf-8')
         frame_data_url = f"data:image/png;base64,{frame_b64}"
-        
-        print(f"[UPLOAD] Frame {i+1}/{num}: extracted at {click_time:.2f}s, cursor at ({cursor_x}, {cursor_y}), size: {len(frame_b64)} chars")
         
         # Upload narration audio to central API
         audio_file = session_dir / f"{video_name}_narration_{i}.mp3"
@@ -1016,8 +1037,8 @@ async def upload_to_central(session_id: str):
                     "type": "cursor",
                     "x": cursor_x,
                     "y": cursor_y,
-                    "width": 40,
-                    "height": 40,
+                    "width": 60,
+                    "height": 60,
                     "backgroundColor": "transparent",
                     "opacity": 1,
                     "borderWidth": 0,
@@ -1029,7 +1050,8 @@ async def upload_to_central(session_id: str):
         screens.append(screen)
         print(f"[UPLOAD] Screen {i+1}/{num}: click at ({cursor_x}, {cursor_y}), audio: {audio_duration_ms}ms")
     
-    video.close()
+    if video:
+        video.close()
     
     if not screens:
         return {"status": "error", "message": "No screens could be created from the session data."}
