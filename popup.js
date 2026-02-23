@@ -451,7 +451,7 @@ function renderRecordings(recordings) {
                             <button class="play-btn" data-id="${rec.id}" title="Play">${playIcon}</button>
                             <button class="ai-btn" data-id="${rec.id}" title="AI Analysis">${sparklesIcon}</button>
                             <button class="download-btn" data-id="${rec.id}" title="Download Video">${downloadIcon}</button>
-                            <button class="frames-btn" data-id="${rec.id}" title="Download Frames" ${framesCount === 0 ? 'disabled' : ''}>${framesIcon}</button>
+                            <button class="upload-raw-btn" data-id="${rec.id}" title="Upload to Server" ${framesCount === 0 ? 'disabled' : ''}>${uploadIcon}</button>
                             <button class="delete-btn" data-id="${rec.id}" title="Delete">${deleteIcon}</button>
                         </div>
                     </div>
@@ -496,8 +496,10 @@ function renderRecordings(recordings) {
     });
 
     // Event listeners specific to non-analyzed recordings
-    recordingsList.querySelectorAll(".frames-btn").forEach((btn) => {
-        btn.addEventListener("click", () => downloadFrames(parseInt(btn.dataset.id)));
+    recordingsList.querySelectorAll(".upload-raw-btn").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+            await uploadRawRecording(parseInt(btn.dataset.id));
+        });
     });
 
     recordingsList.querySelectorAll(".ai-btn").forEach((btn) => {
@@ -773,6 +775,103 @@ async function downloadFrames(id) {
         console.log(`Downloaded ${recording.frames.length} frames for recording ${id}`);
     } catch (err) {
         console.error("Failed to download frames:", err);
+    }
+}
+
+async function uploadRawRecording(id) {
+    /**
+     * Uploads a raw (non-analyzed) recording as a kit to the central website.
+     * Sends the video blob, pre-captured frames, and click data to the backend's
+     * /upload-raw endpoint, which builds clean + annotated frames and posts the
+     * kit to the central API — no AI analysis required.
+     *
+     * @param {number} id - Recording ID from IndexedDB
+     */
+    const uploadBtn = document.querySelector(`.upload-raw-btn[data-id="${id}"]`);
+    const originalHTML = uploadBtn ? uploadBtn.innerHTML : '';
+
+    try {
+        const recording = await window.RecordingsDB.getRecording(id);
+        if (!recording) {
+            console.error("Recording not found");
+            return;
+        }
+
+        if (!recording.frames || recording.frames.length === 0) {
+            document.querySelector(".success-icon").textContent = "✗";
+            successTitle.textContent = "Upload Failed";
+            successMessage.textContent = "No frames captured for this recording. Please record again with click detection active.";
+            successModal.classList.add("active");
+            return;
+        }
+
+        // Show loading spinner on button
+        if (uploadBtn) {
+            uploadBtn.disabled = true;
+            uploadBtn.innerHTML = `<svg class="spin" viewBox="0 0 24 24"><path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46C19.54 15.03 20 13.57 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74C4.46 8.97 4 10.43 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/></svg>`;
+        }
+
+        console.log(`[UPLOAD-RAW] Uploading recording ${id}: ${recording.frames.length} frames, ${recording.clicks?.length || 0} clicks`);
+
+        // Convert video blob to base64 data URL for transport
+        let videoBlob = "";
+        if (recording.blob) {
+            videoBlob = await new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onloadend = () => resolve(reader.result);
+                reader.onerror = () => reject(new Error("Failed to read video blob"));
+                reader.readAsDataURL(recording.blob);
+            });
+        }
+
+        const response = await fetch("http://localhost:8000/upload-raw", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                frames: recording.frames || [],
+                clicks: recording.clicks || [],
+                videoBlob,
+                name: recording.name || `Recording ${id}`,
+            }),
+        });
+
+        const result = await response.json();
+
+        if (result.status === "ok") {
+            console.log("[UPLOAD-RAW] Success:", result);
+
+            // Mark recording as uploaded in IndexedDB
+            await window.RecordingsDB.updateRecording(id, {
+                uploaded_at: new Date().toISOString(),
+                upload_status: "completed",
+                raw_kit_id: result.kit_id || "",
+            });
+
+            document.querySelector(".success-icon").textContent = "✓";
+            successTitle.textContent = "Kit Uploaded!";
+            successMessage.textContent = result.message || "Your recording has been uploaded to the central website.";
+            successModal.classList.add("active");
+
+            loadRecordings();
+        } else {
+            console.error("[UPLOAD-RAW] Failed:", result);
+            document.querySelector(".success-icon").textContent = "✗";
+            successTitle.textContent = "Upload Failed";
+            successMessage.textContent = result.message || "Failed to upload recording.";
+            successModal.classList.add("active");
+        }
+
+    } catch (err) {
+        console.error("Failed to upload raw recording:", err);
+        document.querySelector(".success-icon").textContent = "✗";
+        successTitle.textContent = "Upload Error";
+        successMessage.textContent = "Could not connect to the server. Is the backend running?";
+        successModal.classList.add("active");
+    } finally {
+        if (uploadBtn) {
+            uploadBtn.disabled = false;
+            uploadBtn.innerHTML = originalHTML;
+        }
     }
 }
 

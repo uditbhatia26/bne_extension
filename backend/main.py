@@ -27,6 +27,8 @@ MODEL_NAME = 'gemini-2.5-flash'  # gemini-2.5-flash, gemini-2.0-flash-lite, gemi
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 SESSIONS_DIR = Path("sessions")
 SESSIONS_DIR.mkdir(exist_ok=True)
+CENTRAL_BASE_URL = "http://127.0.0.1:8002"  # Base URL for all central API calls
+CENTRAL_API_URL = f"{CENTRAL_BASE_URL}/api/kits/simple"  # Kit upload endpoint
 
 VOICE_MAP = {
     "Sarah": "EXAVITQu4vr4xnSDxMaL",
@@ -921,12 +923,234 @@ async def process_render_job(
         })
 
 
-
-CENTRAL_API_URL = "http://127.0.0.1:8002/api/kits"
-
-
 class UploadRequest(BaseModel):
     frames: list = []  # Pre-captured frames from the extension
+    videoUrl: str = ""   # Optional: pre-hosted video URL (unused for now; video is uploaded from session dir)
+
+
+class UploadRawRequest(BaseModel):
+    frames: list = []       # Pre-captured frames [{image, clickTime, clickX, clickY, clientX, clientY}]
+    clicks: list = []       # Raw click event objects from the extension
+    videoBlob: str = ""     # Base64 data-URL of the raw WebM recording
+    name: str = ""          # User-provided recording name
+
+
+@app.post('/upload-raw')
+async def upload_raw_to_central(body: UploadRawRequest):
+    """
+    Upload a raw (non-analyzed) recording as a kit to the central website.
+
+    Accepts the video blob, pre-captured frames, and click data directly from the
+    extension — no prior AI analysis required. Builds a kit with clean + annotated
+    frames and posts it to the central API using the same schema as /upload/{session_id}.
+
+    Args:
+        body: JSON body with frames, clicks, videoBlob (base64), and recording name.
+
+    Returns:
+        JSON with status and the response from the central API.
+    """
+    frames = body.frames or []
+    clicks = body.clicks or []
+    video_blob_b64 = body.videoBlob or ""
+    recording_name = body.name or "Untitled Recording"
+
+    if not frames:
+        return {"status": "error", "message": "No frames provided."}
+
+    # Generate a unique kit ID for this raw upload
+    kit_id = uuid.uuid4().hex
+    kit_title = recording_name.replace("_", " ").title()
+
+    print(f"[UPLOAD-RAW] Starting raw upload: kit_id={kit_id}, frames={len(frames)}, clicks={len(clicks)}, name={recording_name!r}")
+
+    # Compute y_offset from zoomLevel — same formula as the analyzed upload
+    # zoomLevel is stored on each click event object by the content script
+    zoom_level = clicks[0].get('zoomLevel', 1.0) if clicks else 1.0
+    y_offset = 114 * zoom_level
+    print(f"[UPLOAD-RAW] zoomLevel={zoom_level}, y_offset={y_offset}")
+
+    # Determine frame dimensions from the first frame
+    first_frame = frames[0]
+    frame_img_data = first_frame.get("image", "")
+    frame_width, frame_height = 1920, 1080
+    if frame_img_data.startswith("data:"):
+        try:
+            _, b64data = frame_img_data.split(",", 1)
+            img_bytes = base64.b64decode(b64data)
+            nparr = np.frombuffer(img_bytes, np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            if img is not None:
+                frame_height, frame_width = img.shape[:2]
+        except Exception as e:
+            print(f"[UPLOAD-RAW] Could not decode first frame for dimensions: {e}")
+
+    print(f"[UPLOAD-RAW] Frame dimensions: {frame_width}x{frame_height}")
+
+    # Upload the clean video to the central API (if blob provided)
+    kit_video_url = ""
+    if video_blob_b64 and video_blob_b64.startswith("data:"):
+        try:
+            _, vid_b64 = video_blob_b64.split(",", 1)
+            vid_bytes = base64.b64decode(vid_b64)
+            print(f"[UPLOAD-RAW] Uploading clean video ({len(vid_bytes)} bytes) to central API...")
+            async with httpx.AsyncClient(timeout=120.0) as http_client:
+                video_response = await http_client.post(
+                    f"{CENTRAL_BASE_URL}/api/screens/video",
+                    data={"kit_id": kit_id},
+                    files={"video": (f"{kit_id}.webm", vid_bytes, "video/webm")}
+                )
+            if video_response.status_code in (200, 201):
+                kit_video_url = video_response.json().get("video_url", "")
+                print(f"[UPLOAD-RAW] Clean video uploaded → {kit_video_url}")
+            else:
+                print(f"[UPLOAD-RAW] WARNING: Video upload failed: {video_response.status_code} - {video_response.text}")
+        except Exception as e:
+            print(f"[UPLOAD-RAW] WARNING: Video upload error: {e}")
+
+    # Build screens — one per frame
+    now_ms = int(time.time() * 1000)
+    screens = []
+
+    for i, frame in enumerate(frames):
+        frame_img = frame.get("image", "")
+        click_time = frame.get("clickTime", 0.0)
+
+        # Use clientX/clientY from the matching click event object (has zoomLevel context),
+        # falling back to the frame's own coords if the click list is shorter.
+        if i < len(clicks):
+            cursor_x = int(clicks[i].get('clientX', 0))
+            cursor_y = int(clicks[i].get('clientY', 0)) + int(y_offset)
+        else:
+            cursor_x = int(frame.get('clientX') or frame.get('clickX') or 0)
+            cursor_y = int(frame.get('clientY') or frame.get('clickY') or 0) + int(y_offset)
+
+        if not frame_img.startswith("data:"):
+            print(f"[UPLOAD-RAW] WARNING: Frame {i} has no valid image data, skipping")
+            continue
+
+        # Decode frame
+        try:
+            _, b64data = frame_img.split(",", 1)
+            img_bytes = base64.b64decode(b64data)
+            nparr = np.frombuffer(img_bytes, np.uint8)
+            frame_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            if frame_bgr is None:
+                raise ValueError("cv2.imdecode returned None")
+        except Exception as e:
+            print(f"[UPLOAD-RAW] WARNING: Could not decode frame {i}: {e}")
+            continue
+
+        # Encode clean (unannotated) frame
+        _, clean_buffer = cv2.imencode(".png", frame_bgr)
+        clean_b64 = base64.b64encode(clean_buffer).decode("utf-8")
+        clean_data_url = f"data:image/png;base64,{clean_b64}"
+
+        # Draw green rectangle annotation at click point
+        rect_size = 60
+        x1 = int(cursor_x - rect_size // 2)
+        y1 = int(cursor_y - rect_size // 2)
+        x2 = int(cursor_x + rect_size // 2)
+        y2 = int(cursor_y + rect_size // 2)
+        cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), (0, 255, 0), 3)
+
+        # Encode annotated frame
+        _, ann_buffer = cv2.imencode(".png", frame_bgr)
+        ann_b64 = base64.b64encode(ann_buffer).decode("utf-8")
+        ann_data_url = f"data:image/png;base64,{ann_b64}"
+
+        screen_id = f"screen_{kit_id}_{i}"
+        screen = {
+            "id": screen_id,
+            "name": f"Step {i + 1}",
+            "width": frame_width,
+            "height": frame_height,
+            "backgroundColor": "#000000",
+            "backgroundImage": ann_data_url,
+            "cleanBackgroundImage": clean_data_url,
+            "audioUrl": "",
+            "audioText": "",
+            "audioLanguage": "en",
+            "audioDuration": 0,
+            "screenDuration": 5000,
+            "autoNext": True,
+            "elements": [
+                {
+                    "id": f"cursor_{kit_id}_{i}",
+                    "type": "cursor",
+                    "x": cursor_x,
+                    "y": cursor_y,
+                    "width": 60,
+                    "height": 60,
+                    "backgroundColor": "transparent",
+                    "opacity": 1,
+                    "borderWidth": 0,
+                    "borderColor": "transparent",
+                    "action": "click",
+                    "content": json.dumps({"clickTime": click_time}),  # seconds into session video
+                }
+            ],
+        }
+        screens.append(screen)
+        print(f"[UPLOAD-RAW] Screen {i+1}/{len(frames)}: click at ({cursor_x}, {cursor_y}), t={click_time:.2f}s")
+
+    if not screens:
+        return {"status": "error", "message": "No valid screens could be created from the provided frames."}
+
+    # Build kit payload
+    thumbnail = screens[0]["backgroundImage"] if screens else ""
+    kit_payload = {
+        "id": kit_id,
+        "title": kit_title,
+        "thumbnail": thumbnail,
+        "videoUrl": kit_video_url,  # Full session video URL at kit level (for Preview button)
+        "createdAt": now_ms,
+        "updatedAt": now_ms,
+        "userId": 3,
+        "published": False,
+        "publishedKitId": "",
+        "screens": screens,
+    }
+
+    print(f"[UPLOAD-RAW] Kit payload built: {len(screens)} screens, title: {kit_title!r}")
+    print(f"[UPLOAD-RAW] Kit-level videoUrl: '{kit_video_url}' (empty = video upload failed)")
+
+    # POST to central API
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            response = await client.post(
+                CENTRAL_API_URL,
+                json=kit_payload,
+                headers={"Content-Type": "application/json"},
+            )
+
+        print(f"[UPLOAD-RAW] Central API response: {response.status_code}")
+
+        if response.status_code in (200, 201):
+            result = response.json()
+            print(f"[UPLOAD-RAW] Upload successful: kit_id={result.get('id')} title={result.get('title')!r} videoUrl={result.get('videoUrl')} screens={len(result.get('screens', []))}")
+            return {
+                "status": "ok",
+                "message": "Kit uploaded successfully!",
+                "kit_id": kit_id,
+                "central_response": result,
+            }
+        else:
+            error_text = response.text
+            print(f"[UPLOAD-RAW] Upload failed: {response.status_code} - {error_text}")
+            return {
+                "status": "error",
+                "message": f"Central API returned {response.status_code}: {error_text}",
+            }
+    except httpx.ConnectError:
+        print(f"[UPLOAD-RAW] Could not connect to central API at {CENTRAL_API_URL}")
+        return {
+            "status": "error",
+            "message": f"Could not connect to central API at {CENTRAL_API_URL}. Is the server running?",
+        }
+    except Exception as e:
+        print(f"[UPLOAD-RAW] Error uploading to central API: {e}")
+        return {"status": "error", "message": f"Upload failed: {str(e)}"}
 
 
 @app.post('/upload/{session_id}')
@@ -1010,6 +1234,45 @@ async def upload_to_central(session_id: str, body: UploadRequest = UploadRequest
         frame_height = video.size[1]
         print(f"[UPLOAD] Fallback: extracting frames from video: {frame_width}x{frame_height}")
     
+    # Upload the clean (raw) session video to the central API to get a hosted URL
+    kit_video_url = ""
+    video_path_for_upload = session_dir / video_filename
+    # Prefer the fixed WebM if it was already created during a prior render
+    fixed_video_path_for_upload = session_dir / f"{video_name}_fixed.webm"
+    if fixed_video_path_for_upload.exists():
+        video_path_for_upload = fixed_video_path_for_upload
+
+    print(f"[UPLOAD] Video file check:")
+    print(f"[UPLOAD]   session_dir = {session_dir}")
+    print(f"[UPLOAD]   video_filename = {video_filename}")
+    print(f"[UPLOAD]   video_path_for_upload = {video_path_for_upload}")
+    print(f"[UPLOAD]   exists = {video_path_for_upload.exists()}")
+    # List all files in session dir for debugging
+    if session_dir.exists():
+        files = list(session_dir.iterdir())
+        print(f"[UPLOAD]   files in session dir: {[f.name for f in files]}")
+
+    if video_path_for_upload.exists():
+        try:
+            print(f"[UPLOAD] Uploading clean video to central API: {video_path_for_upload.name}")
+            async with httpx.AsyncClient(timeout=120.0) as http_client:
+                with open(video_path_for_upload, "rb") as vf:
+                    video_response = await http_client.post(
+                        f"{CENTRAL_BASE_URL}/api/screens/video",
+                        data={"kit_id": session_id},
+                        files={"video": (video_path_for_upload.name, vf, "video/webm")}
+                    )
+            if video_response.status_code in (200, 201):
+                video_result = video_response.json()
+                kit_video_url = video_result.get("video_url", "")
+                print(f"[UPLOAD] Clean video uploaded → {kit_video_url}")
+            else:
+                print(f"[UPLOAD] WARNING: Video upload failed: {video_response.status_code} - {video_response.text}")
+        except Exception as e:
+            print(f"[UPLOAD] WARNING: Video upload error: {e}")
+    else:
+        print(f"[UPLOAD] WARNING: Video file not found for upload: {video_path_for_upload}")
+
     # Build screens - one per click/narration
     num = min(len(narrations), len(click_data))
     screens = []
@@ -1046,6 +1309,11 @@ async def upload_to_central(session_id: str, body: UploadRequest = UploadRequest
             frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
             print(f"[UPLOAD] Frame {i+1}/{num}: extracted from video at {click_time:.2f}s, cursor at ({cursor_x}, {cursor_y})")
         
+        # Encode clean (unannotated) frame as base64 PNG
+        _, clean_buffer = cv2.imencode('.png', frame_bgr)
+        clean_b64 = base64.b64encode(clean_buffer).decode('utf-8')
+        clean_data_url = f"data:image/png;base64,{clean_b64}"
+        
         # Draw rectangle annotation (same as render_voice_with_annotations)
         rect_size = 60
         rect_color = (0, 255, 0)  # Green in BGR
@@ -1075,7 +1343,7 @@ async def upload_to_central(session_id: str, body: UploadRequest = UploadRequest
                 async with httpx.AsyncClient(timeout=60.0) as http_client:
                     with open(audio_file, "rb") as f:
                         response = await http_client.post(
-                            f"{CENTRAL_API_URL.replace('/api/kits', '')}/api/screens/audio",
+                            f"{CENTRAL_BASE_URL}/api/screens/audio",
                             data={"screen_id": screen_id},
                             files={"audio": (audio_file.name, f, "audio/mpeg")}
                         )
@@ -1083,7 +1351,7 @@ async def upload_to_central(session_id: str, body: UploadRequest = UploadRequest
                 if response.status_code in (200, 201):
                     audio_result = response.json()
                     audio_url = audio_result.get("audio_url", "")
-                    print(f"[UPLOAD] Audio {i+1}/{num}: uploaded → {audio_url}")
+                    print(f"[UPLOAD] Audio {i+1}/{num}: uploaded \u2192 {audio_url}")
                 else:
                     print(f"[UPLOAD] WARNING: Audio upload failed for screen {i}: {response.status_code} - {response.text}")
             except Exception as e:
@@ -1096,6 +1364,7 @@ async def upload_to_central(session_id: str, body: UploadRequest = UploadRequest
             "height": frame_height,
             "backgroundColor": "#000000",
             "backgroundImage": frame_data_url,
+            "cleanBackgroundImage": clean_data_url,
             "audioUrl": audio_url,
             "audioText": narr.get("narration_text", ""),
             "audioLanguage": meta.get("language", "en"),
@@ -1119,7 +1388,7 @@ async def upload_to_central(session_id: str, body: UploadRequest = UploadRequest
             ]
         }
         screens.append(screen)
-        print(f"[UPLOAD] Screen {i+1}/{num}: click at ({cursor_x}, {cursor_y}), audio: {audio_duration_ms}ms")
+        print(f"[UPLOAD] Screen {i+1}/{num}: click at ({cursor_x}, {cursor_y}), audio: {audio_duration_ms}ms, video: {kit_video_url[:60] if kit_video_url else 'none'}")
     
     if video:
         video.close()
@@ -1135,6 +1404,7 @@ async def upload_to_central(session_id: str, body: UploadRequest = UploadRequest
         "id": session_id,
         "title": meta.get("video_name", "Untitled Kit").replace("_", " ").title(),
         "thumbnail": thumbnail,
+        "videoUrl": kit_video_url,  # Full session video URL at kit level (for Preview button)
         "createdAt": now_ms,
         "updatedAt": now_ms,
         "userId": 3,
@@ -1144,6 +1414,7 @@ async def upload_to_central(session_id: str, body: UploadRequest = UploadRequest
     }
     
     print(f"[UPLOAD] Kit payload built: {len(screens)} screens, title: {kit_payload['title']}")
+    print(f"[UPLOAD] Kit-level videoUrl: '{kit_payload['videoUrl']}' (empty = video upload failed)")
     
     # POST to central API
     try:
@@ -1158,7 +1429,7 @@ async def upload_to_central(session_id: str, body: UploadRequest = UploadRequest
         
         if response.status_code in (200, 201):
             result = response.json()
-            print(f"[UPLOAD] Upload successful: {result}")
+            print(f"[UPLOAD] Upload successful: kit_id={result.get('id')} title={result.get('title')!r} videoUrl={result.get('videoUrl')} screens={len(result.get('screens', []))}")
             return {
                 "status": "ok",
                 "message": "Kit uploaded successfully!",
